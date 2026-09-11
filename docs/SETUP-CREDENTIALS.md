@@ -36,14 +36,16 @@ an admin then sets role/facility (admin panel or direct SQL for now).
 | `NEXT_PUBLIC_SUPABASE_URL` | Supabase → Settings → API |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabase → Settings → API |
 
-Deploy:
+Deploy (the dashboard is a static export — see `dashboard/README.md`):
 
 ```bash
-# Vercel CLI
-vercel --prod            # Root Directory: dashboard/
+# Vercel CLI, from the repository root — the root vercel.json builds
+# dashboard/ as a static site (framework "Other", output dashboard/out).
+vercel --prod
 
-# or in the Vercel dashboard: New Project → import repo →
-#    Framework: Next.js → Root Directory: dashboard → add the two env vars
+# or in the Vercel dashboard: New Project → import repo → add the two env
+# variables → Deploy. No Root Directory change is required; setting it to
+# dashboard with the Next.js preset also works.
 ```
 
 Without those variables the dashboard runs in demo mode (no real data).
