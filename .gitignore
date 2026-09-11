@@ -1,0 +1,34 @@
+# Node / Next.js
+node_modules/
+.next/
+out/
+dist/
+build/
+coverage/
+npm-debug.log*
+.env
+.env.local
+.env.*.local
+
+# Flutter / Dart
+.dart_tool/
+.packages
+build_flutter/
+*.iml
+.flutter-plugins
+.flutter-plugins-dependencies
+.idea/
+
+# Android
+.gradle/
+local.properties
+*.apk
+*.aab
+
+# Deno / Supabase CLI local state
+.deno/
+supabase/.temp/
+
+# OS
+.DS_Store
+Thumbs.db
