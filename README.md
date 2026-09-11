@@ -57,8 +57,16 @@ npm run dev            # http://localhost:3000 — demo data, no credentials nee
 ```
 
 Set `NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_ANON_KEY` (`.env.local`) to
-switch from demo data to live data. Deploy to Vercel by importing this repo and
-setting the **Root Directory** to `dashboard`.
+switch from demo data to live data.
+
+The dashboard is a **static export** (`next build` → `dashboard/out`), so
+deploying needs no Vercel console configuration: import this repository and the
+root `vercel.json` builds `dashboard/` with the **Other** framework preset and
+serves `dashboard/out`. (Alternatively set the project **Root Directory** to
+`dashboard` with the Next.js preset — both setups work.) `npm run build &&
+npm start` inside `dashboard/` serves the exact same files locally. See
+`dashboard/README.md` for the `404: NOT_FOUND` / `No Next.js version detected` /
+Deployment-Protection troubleshooting steps.
 
 ### 2. Supabase backend
 
