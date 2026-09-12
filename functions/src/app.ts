@@ -8,7 +8,7 @@ import { adminRouter } from './routes/admin.js';
 import { notificationsRouter, notificationsStatus } from './routes/notifications.js';
 import { contactRouter } from './routes/contact.js';
 import { drainSmsQueue, notifySweep, reclaimStaleSends } from './jobs/queue.js';
-import { policy } from './cloudinary.js';
+import { runReminderSweep } from './jobs/reminders.js';
 
 /**
  * The MAMA CARE API service.
@@ -37,7 +37,7 @@ export function createApp(): Express {
     const admin = adminStatus();
     const degraded: string[] = [];
     if (!admin.ready) degraded.push('firebase-admin: privileged account operations are unavailable');
-    if (!env.cloudinary.configured) degraded.push('cloudinary: signed uploads and private delivery are unavailable');
+    if (!env.cloudinary.configured) degraded.push('cloudinary: server-side asset deletion is unavailable (unsigned browser uploads are unaffected)');
     if (!env.sms.configured) degraded.push('sms: reminders are queued, not delivered');
     if (!env.email.configured) degraded.push('email-relay: contact messages are stored but not forwarded');
 
@@ -76,6 +76,16 @@ export function createApp(): Express {
     }
   });
 
+  router.post('/jobs/reminders', async (req: Request, res: Response, next) => {
+    try {
+      await authorizeJob(req);
+      const report = await runReminderSweep();
+      res.json(report);
+    } catch (error) {
+      next(error);
+    }
+  });
+
   router.post('/jobs/sweep-notified', async (req: Request, res: Response, next) => {
     try {
       await authorizeJob(req);
@@ -95,8 +105,6 @@ export function createApp(): Express {
         '/auth/sync-claims',
         '/auth/stored-role',
         '/media/policy',
-        '/media/sign',
-        '/media/sign-url',
         '/media/delete',
         '/admin/users/role',
         '/admin/users/status',
@@ -110,9 +118,10 @@ export function createApp(): Express {
         '/notifications/announce',
         '/contact',
         '/jobs/sms-drain',
+        '/jobs/reminders',
         '/jobs/sweep-notified',
       ],
-      note: 'This service holds the Cloudinary API secret and the Firebase Admin credentials. Nothing here widens a caller’s access without their verified ID token.',
+      note: 'This service holds the Firebase Admin credentials and, optionally, the Cloudinary admin key used only to delete assets. Nothing here widens a caller’s access without their verified ID token.',
     });
   });
 

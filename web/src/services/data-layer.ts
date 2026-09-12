@@ -44,6 +44,15 @@ import type {
   RowOf,
 } from '@/services/data/contract';
 import { DEFAULT_ALERT_RULES, buildSnapshot, evaluateRules, toAlertDrafts } from '@/services/clinical/alert-engine';
+import {
+  missedMessage,
+  reminderKey,
+  reminderLeads,
+  reminderMessage,
+  reviewLabel,
+  reviewStatus,
+  todayIso,
+} from '@/services/clinical/reminder-engine';
 
 export type AuditTarget =
   | 'user'
@@ -57,6 +66,9 @@ export type AuditTarget =
   | 'document'
   | 'facility'
   | 'notification'
+  | 'message'
+  | 'announcement'
+  | 'service'
   | 'rule'
   | 'settings'
   | 'media'
@@ -979,9 +991,15 @@ export class DataLayer {
     return saved;
   }
 
-  /** Flags every past-dated scheduled appointment as missed (idempotent sweep). */
-  async sweepMissedAppointments(facilityId?: string | null): Promise<{ updated: number }> {
-    const today = toIsoDate(new Date());
+  /**
+   * Flags every past-dated scheduled review as missed and tells the mother.
+   *
+   * Idempotent: a review is only written once, and the "Missed Review" message
+   * is recorded against the appointment so a repeated sweep — several devices,
+   * several days, a retried job — never sends it twice.
+   */
+  async sweepMissedAppointments(facilityId?: string | null): Promise<{ updated: number; notified: number }> {
+    const today = todayIso();
     const { rows } = await this.list('appointments', {
       where: [
         { field: 'status', op: 'in', value: ['SCHEDULED', 'CONFIRMED'] },
@@ -989,15 +1007,49 @@ export class DataLayer {
       ],
     });
     let updated = 0;
+    let notified = 0;
     for (const appointment of rows) {
       if (facilityId && appointment.facilityId !== facilityId) continue;
-      await this.setAppointmentStatus(appointment.id, 'MISSED', { note: 'Automatically flagged: past due without a recorded outcome.' });
+      await this.setAppointmentStatus(appointment.id, 'MISSED', {
+        note: 'Automatically flagged: the scheduled date passed with no recorded outcome.',
+      });
       updated += 1;
+
+      // `setAppointmentStatus` raises the follow-up alert and sends a status
+      // change message. The mother's own wording is sent here, once.
+      const missedKey = 'missed';
+      if (!appointment.remindersSent?.[missedKey]) {
+        const [mother, facility] = await Promise.all([
+          this.get('mothers', appointment.motherId),
+          appointment.facilityId ? this.get('facilities', appointment.facilityId) : Promise.resolve(null),
+        ]);
+        const message = missedMessage(appointment, facility?.name ?? null);
+        await this.notify({
+          userId: mother?.userId ?? '',
+          kind: 'APPOINTMENT_REMINDER',
+          title: message.title,
+          body: message.body,
+          level: 'warning',
+          link: '/appointments',
+          motherId: appointment.motherId,
+          sms: appointment.smsEnabled,
+        }).catch(() => null);
+        await this.update('appointments', appointment.id, {
+          remindersSent: { ...(appointment.remindersSent ?? {}), [missedKey]: now() },
+        } as Partial<Appointment>).catch(() => null);
+        notified += 1;
+      }
       if (updated >= 50) break;
     }
-    return { updated };
+    return { updated, notified };
   }
 
+  /**
+   * Sends the reminders that are due today.
+   *
+   * A review due today always reminds (lead 0) in addition to whatever lead
+   * times the appointment carries. Each lead is recorded so it fires once.
+   */
   async sendDueReminders(facilityId?: string | null): Promise<{ sent: number }> {
     const today = new Date();
     const { rows } = await this.list('appointments', {
@@ -1006,29 +1058,86 @@ export class DataLayer {
     let sent = 0;
     for (const appointment of rows) {
       if (facilityId && appointment.facilityId !== facilityId) continue;
+      if (reviewStatus(appointment, today) === 'MISSED') continue;
       const lead = daysBetween(today, new Date(appointment.scheduledFor));
-      for (const reminder of appointment.reminderDays ?? []) {
+      for (const reminder of reminderLeads(appointment)) {
         if (lead !== reminder) continue;
-        if (appointment.remindersSent?.[String(reminder)]) continue;
+        const key = reminderKey(reminder);
+        if (appointment.remindersSent?.[key]) continue;
         const mother = await this.get('mothers', appointment.motherId);
+        const message = reminderMessage(appointment);
         await this.notify({
           userId: mother?.userId ?? '',
           kind: 'APPOINTMENT_REMINDER',
-          title: `Reminder: appointment in ${reminder} day${reminder === 1 ? '' : 's'}`,
-          body: `${appointment.type.replace(/_/g, ' ')} on ${formatDate(appointment.scheduledFor, 'day')} at ${appointment.time}. Bring your health passport.`,
-          level: 'info',
+          title: message.title,
+          body: message.body,
+          level: reminder === 0 ? 'warning' : 'info',
           link: '/appointments',
           motherId: appointment.motherId,
           sms: appointment.smsEnabled,
-        });
+        }).catch(() => null);
         await this.update('appointments', appointment.id, {
-          remindersSent: { ...(appointment.remindersSent ?? {}), [String(reminder)]: now() },
-        } as Partial<Appointment>);
-        await this.audit('appointment.reminder_sent', 'appointment', appointment.id, { label: appointment.patientId, metadata: { leadDays: reminder } });
+          remindersSent: { ...(appointment.remindersSent ?? {}), [key]: now() },
+        } as Partial<Appointment>).catch(() => null);
+        await this.audit('appointment.reminder_sent', 'appointment', appointment.id, {
+          label: appointment.patientId,
+          metadata: { leadDays: reminder, review: reviewLabel(appointment.type) },
+        }).catch(() => null);
         sent += 1;
       }
     }
     return { sent };
+  }
+
+  /**
+   * Automatic reminder pass: mark what was missed, then send what is due.
+   *
+   * Safe to call as often as you like — from the dashboard, from a device that
+   * just came back online, or from the scheduled Cloud Function. Every write is
+   * guarded by a per-appointment key, so two overlapping passes cannot double
+   * notify a mother.
+   */
+  async runReminderPass(facilityId?: string | null): Promise<{ missed: number; missedNotified: number; reminders: number }> {
+    const [sweep, reminders] = await Promise.all([
+      this.sweepMissedAppointments(facilityId).catch(() => ({ updated: 0, notified: 0 })),
+      this.sendDueReminders(facilityId).catch(() => ({ sent: 0 })),
+    ]);
+    return { missed: sweep.updated, missedNotified: sweep.notified, reminders: reminders.sent };
+  }
+
+  /** Reviews bucketed by lifecycle status, derived from the calendar. */
+  async reviewBoard(facilityId?: string | null): Promise<{
+    today: Appointment[];
+    upcoming: Appointment[];
+    missed: Appointment[];
+    completed: Appointment[];
+  }> {
+    const { rows } = await this.list('appointments', {
+      where: facilityId ? [{ field: 'facilityId', op: '==', value: facilityId }] : [],
+      orderBy: { field: 'scheduledFor', direction: 'asc' },
+      limit: 500,
+    });
+    const today = new Date();
+    const board = { today: [] as Appointment[], upcoming: [] as Appointment[], missed: [] as Appointment[], completed: [] as Appointment[] };
+    for (const appointment of rows) {
+      switch (reviewStatus(appointment, today)) {
+        case 'TODAY':
+          board.today.push(appointment);
+          break;
+        case 'UPCOMING':
+          board.upcoming.push(appointment);
+          break;
+        case 'MISSED':
+          board.missed.push(appointment);
+          break;
+        case 'COMPLETED':
+          board.completed.push(appointment);
+          break;
+        default:
+          break;
+      }
+    }
+    return board;
   }
 
   /* ── referrals ─────────────────────────────────────────────────── */

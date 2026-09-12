@@ -250,22 +250,6 @@ export class LocalDataProvider implements DataProvider {
     await store.wipe();
   }
 
-  /**
-   * Demonstration dataset. Loaded lazily so the seeding module (which reads the
-   * service registry) never becomes an import cycle, and unavailable unless the
-   * device provider is active.
-   */
-  async seedDemonstrationData(options: { force?: boolean } = {}): Promise<{ created: number; summary: string[] }> {
-    if (typeof window === 'undefined') throw new AppError('Seeding is only available in the browser.', 'CONFIGURATION');
-    const { seedDemonstrationData } = await import('@/services/demo/dataset');
-    const summary = await seedDemonstrationData(options);
-    const created = Object.values(summary).reduce<number>((total, value) => total + (typeof value === 'number' ? value : 0), 0);
-    return {
-      created,
-      summary: Object.entries(summary).map(([key, value]) => `${key}: ${value}`),
-    };
-  }
-
   /** Exposed for the demonstration-dataset tooling (device provider only). */
   async seedRows<T extends CollectionName>(name: T, rows: RowOf<T>[]): Promise<void> {
     await store.bulkPut(name, rows as unknown as { id: string }[]);

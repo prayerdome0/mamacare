@@ -1,5 +1,7 @@
 import { onRequest } from 'firebase-functions/v2/https';
+import { onSchedule } from 'firebase-functions/v2/scheduler';
 import { createApp } from './app.js';
+import { runReminderSweep } from './jobs/reminders.js';
 import { env, redactedSummary } from './env.js';
 
 /**
@@ -33,7 +35,7 @@ if (!runningAsFunction) {
     console.info(`[mamacare-api] listening on http://0.0.0.0:${env.port} (${env.nodeEnv})`);
     console.info(`[mamacare-api] configuration ${JSON.stringify(redactedSummary())}`);
     if (!env.cloudinary.configured) {
-      console.info('[mamacare-api] CLOUDINARY_API_SECRET not set — /media/sign will answer 503 and the web app will fall back to device storage.');
+      console.info('[mamacare-api] CLOUDINARY_API_KEY/SECRET not set — /media/delete will report unavailable. Unsigned browser uploads are unaffected.');
     }
     if (env.bootstrapAdminEmails.length === 0) {
       console.info('[mamacare-api] BOOTSTRAP_ADMIN_EMAILS not set — the first-administrator route is disabled.');
@@ -48,5 +50,32 @@ if (!runningAsFunction) {
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
 }
+
+/**
+ * Daily maternity-review reminder sweep.
+ *
+ * Runs at 07:00 Africa/Lusaka so a mother is told about a review due that
+ * morning, and told the next day if she missed one — even when no clinician
+ * opened the app. Safe to run alongside the in-app pass: each notification is
+ * written under a per-appointment key, so nobody is notified twice.
+ */
+export const reminderSweep = onSchedule(
+  {
+    schedule: '0 7 * * *',
+    timeZone: 'Africa/Lusaka',
+    region: process.env.FUNCTIONS_REGION || 'us-central1',
+    timeoutSeconds: 300,
+    memory: '256MiB',
+  },
+  async () => {
+    const report = await runReminderSweep();
+    console.info('[mamacare] reminder sweep', JSON.stringify(report));
+  },
+);
+
+/** On-demand sweep, used by the API route below and by manual recovery. */
+export const reminders = {
+  run: runReminderSweep,
+};
 
 export { createApp };

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { ArrowRight, Info, KeyRound, LogIn, UserPlus } from 'lucide-react';
+import { KeyRound, LogIn, UserPlus } from 'lucide-react';
 import { AuthLayout } from '@/routes/auth/auth-layout';
 import { Button } from '@/components/ui/button';
 import { CheckboxRow, Field, PasswordInput, TextInput } from '@/components/ui/form';
@@ -10,13 +10,12 @@ import { signInSchema, EMAIL_PATTERN } from '@/lib/validation';
 import { useSession } from '@/providers/app-providers';
 import { useToast } from '@/components/ui/toast';
 import { safeLocal, safeSession, storageAvailable } from '@/lib/storage';
-import { DEMO_ACCOUNTS } from '@/services/demo/dataset';
 
 /** Where an account should land, by stored role. Admin → /admin, mother → /home, staff → /app. */
 const dashboardFor = (role: string): string => (role === 'ADMIN' ? '/admin' : role === 'MOTHER' ? '/home' : '/app');
 
 export default function SignInPage() {
-  const { signIn, providerKind } = useSession();
+  const { signIn } = useSession();
   const navigate = useNavigate();
   const location = useLocation();
   const toast = useToast();
@@ -52,7 +51,6 @@ export default function SignInPage() {
     if (!result.ok) toast.error(new Error(form.formError ?? ''), 'Sign in failed');
   };
 
-  const showDemo = providerKind === 'local';
   const emailLooksUnregistered = Boolean(form.errors.email === undefined && form.values.email && EMAIL_PATTERN.test(form.values.email) && form.formError);
 
   return (
@@ -155,37 +153,6 @@ export default function SignInPage() {
           Trouble signing in? Ask your facility administrator to confirm your account is active and assigned to your facility.
         </p>
       </form>
-
-      {showDemo ? (
-        <div className="mt-6 border-t border-ink-200 pt-5">
-          <p className="micro mb-2 flex items-center gap-1.5">
-            <Info className="size-3.5" aria-hidden />
-            Evaluation build — seeded accounts (no project configured)
-          </p>
-          <div className="grid gap-1.5 sm:grid-cols-2">
-            {DEMO_ACCOUNTS.slice(0, 6).map((account) => (
-              <button
-                key={account.email}
-                type="button"
-                onClick={() => {
-                  form.setValues({ email: account.email, password: account.password });
-                }}
-                className="flex items-center justify-between gap-2 rounded-lg border border-ink-200 bg-white px-3 py-2 text-left transition-colors hover:border-brand-300 hover:bg-brand-50/50"
-              >
-                <span className="min-w-0">
-                  <span className="block truncate text-[0.8rem] font-semibold text-ink-800">{account.role.replace(/_/g, ' ')}</span>
-                  <span className="block truncate text-[0.72rem] text-ink-500">{account.email}</span>
-                </span>
-                <ArrowRight className="size-3.5 shrink-0 text-ink-400" aria-hidden />
-              </button>
-            ))}
-          </div>
-          <p className="caption mt-2">
-            Choosing one fills the form. These accounts exist only in this browser’s device store; a deployment with a Firebase project
-            shows no seeded accounts.
-          </p>
-        </div>
-      ) : null}
 
       <div className="mt-5 flex flex-wrap justify-center gap-2">
         <Link to="/register" className="btn btn-quiet btn-sm">

@@ -1,111 +1,29 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { env } from '../env.js';
-import { destroyAsset, policy, signUpload, signedDeliveryUrl } from '../cloudinary.js';
-import { dbOrThrow } from '../firebase.js';
-import { conflict, forbidden, withBody } from '../http.js';
+import { forbidden, withBody } from '../http.js';
 import { writeAudit } from '../audit.js';
+import { dbOrThrow } from '../firebase.js';
 import { claimsOf, requireAuth } from './_auth.js';
 
 /**
- * Media routes. The browser can ask for a signature or a delivery URL; it can
- * never see the API secret, choose a folder outside the managed tree, or fetch an
- * asset it has no claim on.
+ * Media routes.
+ *
+ * This deployment uploads public imagery straight from the browser with the
+ * **unsigned** Cloudinary preset, flat at the media-library root — no folder,
+ * no `asset_folder`, no public-id path is ever created. There is therefore no
+ * signing route here at all, and nothing in this service constructs a path.
+ *
+ * The only server-side operation that still needs the Cloudinary Admin API is
+ * deleting an orphaned asset, which a browser may not do with an unsigned
+ * preset. It is enabled only when `CLOUDINARY_API_KEY` and
+ * `CLOUDINARY_API_SECRET` are set; otherwise the route answers `unavailable`
+ * and the media library is tidied by hand.
  */
 export const mediaRouter = Router();
 
-const signBody = z.object({
-  folder: z.string().trim().min(1).max(120),
-  publicId: z.string().trim().min(8).max(400),
-  resourceType: z.enum(['image', 'raw']).default('image'),
-  accessMode: z.enum(['public', 'authenticated', 'private']).optional(),
-  fileSizeBytes: z.number().int().positive().optional(),
-  mimeType: z.string().trim().max(80).optional(),
-  metadata: z.record(z.string(), z.string()).optional(),
-});
-
-mediaRouter.post('/sign', requireAuth, withBody(signBody, async (input, req) => {
-  const claims = claimsOf(req);
-  const params = signUpload(input);
-  await writeAudit(dbOrThrow(), claims, {
-    action: 'media.signed',
-    targetType: 'media',
-    targetId: params.publicId,
-    targetLabel: input.folder,
-    facilityId: claims.facilityId,
-    metadata: { resourceType: input.resourceType, bytes: input.fileSizeBytes ?? null, mode: SIGNED_FOLDERS.includes(input.folder.split('/')[1] ?? '') ? 'signed' : 'unsigned-preset' },
-  });
-  return params;
-}));
-
-const SIGNED_FOLDERS = policy.signedOnlyFolders;
-
-const signUrlBody = z.object({
-  publicId: z.string().trim().min(8).max(400),
-  resourceType: z.enum(['image', 'raw']).default('image'),
-  expiresIn: z.number().int().min(30).max(3600).optional(),
-});
-
-/**
- * Delivery URL for a private asset. Authorisation is decided by the record that
- * references the asset — the same access list the web app enforces — so a leaked
- * public id is not itself a way in.
- */
-mediaRouter.post('/sign-url', requireAuth, withBody(signUrlBody, async (input, req) => {
-  const claims = claimsOf(req);
-  const db = dbOrThrow();
-  const publicId = input.publicId.replace(/^\/+/, '');
-
-  const [byDocument, byReport] = await Promise.all([
-    db.collection('documents').where('publicId', '==', publicId).limit(1).get(),
-    db.collection('reports').where('file.publicId', '==', publicId).limit(1).get(),
-  ]);
-  const record = byDocument.docs[0] ?? byReport.docs[0] ?? null;
-  const isPatientReport = Boolean(record?.get('motherId'));
-
-  if (record) {
-    const accessRoles = (record.get('accessRoles') as string[] | undefined) ?? [];
-    const accessUsers = (record.get('accessUserIds') as string[] | undefined) ?? [];
-    const uploader = record.get('uploadedBy') as string | undefined;
-    const motherId = record.get('motherId') as string | null | undefined;
-    const facilityId = (record.get('facilityId') as string | null | undefined) ?? null;
-
-    const allowed =
-      claims.role === 'ADMIN' ||
-      (claims.motherId !== null && motherId === claims.motherId) ||
-      accessUsers.includes(claims.uid) ||
-      accessRoles.includes(claims.role) ||
-      uploader === claims.uid ||
-      (isPatientReport && claims.role !== 'MOTHER' && facilityId !== null && facilityId === claims.facilityId);
-
-    if (!allowed) throw forbidden('That file is not part of your records.');
-  } else {
-    // No record references it. Only the folders that are public by design may be
-    // delivered without one, plus the caller's own portrait.
-    const second = publicId.split('/')[1] ?? '';
-    const isOwnProfile = second === 'profiles' && publicId.includes(claims.uid);
-    if (!policy.unsignedFolders.includes(second) && !isOwnProfile) {
-      throw conflict('This file is not registered in the document index, so it cannot be delivered.');
-    }
-  }
-
-  const result = signedDeliveryUrl(publicId, input.resourceType, input.expiresIn ?? (record ? 300 : 600));
-  if (record) {
-    await record.ref.update({ lastAccessedAt: new Date().toISOString(), lastAccessedBy: claims.uid }).catch(() => null);
-    await writeAudit(db, claims, {
-      action: 'document.accessed',
-      targetType: 'document',
-      targetId: record.id,
-      targetLabel: (record.get('name') as string | undefined) ?? null,
-      facilityId: (record.get('facilityId') as string | null | undefined) ?? claims.facilityId,
-      metadata: { via: 'signed-url', expiresIn: input.expiresIn ?? 300 },
-    });
-  }
-  return result;
-}));
-
 const deleteBody = z.object({
-  publicId: z.string().trim().min(8).max(400),
+  publicId: z.string().trim().min(1).max(400),
   resourceType: z.enum(['image', 'raw']).default('image'),
   reason: z.string().trim().max(240).optional(),
 });
@@ -114,41 +32,61 @@ mediaRouter.post('/delete', requireAuth, withBody(deleteBody, async (input, req)
   const claims = claimsOf(req);
   const db = dbOrThrow();
   const publicId = input.publicId.replace(/^\/+/, '');
+
   const match = await db.collection('documents').where('publicId', '==', publicId).limit(1).get();
   const record = match.docs[0] ?? null;
-
   if (record) {
     const uploader = record.get('uploadedBy') as string | undefined;
     if (claims.role !== 'ADMIN' && uploader !== claims.uid) {
       throw forbidden('Only the person who uploaded a file, or an administrator, may delete it.');
     }
-  } else if (!publicId.startsWith(`${env.cloudinary.rootFolder}/`)) {
-    throw forbidden('Only assets inside the managed folder tree may be deleted.');
+  } else if (claims.role !== 'ADMIN') {
+    throw forbidden('Only an administrator may remove an asset that is not attached to a record.');
   }
 
-  const result = await destroyAsset(publicId, input.resourceType);
-  if (record) {
-    await record.ref
-      .update({ deletedAt: new Date().toISOString(), deletedBy: claims.uid, secureUrl: null, thumbnailUrl: null })
-      .catch(() => null);
+  if (!env.cloudinary.configured) {
+    await writeAudit(db, claims, {
+      action: 'media.deleted',
+      targetType: 'media',
+      targetId: publicId,
+      facilityId: claims.facilityId,
+      metadata: { deleted: false, reason: input.reason ?? null, note: 'CLOUDINARY_API_KEY/SECRET not set on the API service' },
+    });
+    return { deleted: false, unavailable: true, note: 'The API service has no Cloudinary admin credentials, so the asset could not be removed from the media library.' };
   }
+
+  const timestamp = Math.floor(Date.now() / 1000);
+  const crypto = await import('node:crypto');
+  // Cloudinary signs `public_id` with no folder prefix — the deployment stores
+  // assets flat at the root, so nothing is added to the identifier here.
+  const signature = crypto
+    .createHash('sha1')
+    .update(`public_id=${publicId}&timestamp=${timestamp}${env.cloudinary.apiSecret}`)
+    .digest('hex');
+
+  const body = new URLSearchParams({ public_id: publicId, timestamp: String(timestamp), signature, api_key: env.cloudinary.apiKey });
+  const response = await fetch(`${env.cloudinary.apiBase}/${input.resourceType}/destroy`, { method: 'POST', body });
+  const result = (await response.json().catch(() => ({}))) as { result?: string };
+
   await writeAudit(db, claims, {
     action: 'media.deleted',
     targetType: 'media',
     targetId: publicId,
     facilityId: claims.facilityId,
-    metadata: { reason: input.reason ?? null, recordId: record?.id ?? null, deleted: result.deleted },
+    metadata: { deleted: result.result === 'ok', reason: input.reason ?? null, recordId: record?.id ?? null },
   });
-  return { deleted: result.deleted };
+
+  return { deleted: result.result === 'ok' };
 }));
 
 mediaRouter.get('/policy', (_req, res) => {
   res.json({
-    rootFolder: env.cloudinary.rootFolder,
-    signedOnlyFolders: policy.signedOnlyFolders,
-    unsignedFolders: policy.unsignedFolders,
-    maxBytes: policy.maxBytes,
-    imageTypes: policy.imageTypes,
+    cloudName: env.cloudinary.cloudName || null,
+    unsignedPreset: env.cloudinary.unsignedPreset || null,
+    // Flat by policy: no folders anywhere in the Cloudinary media library.
+    folders: false,
+    maxBytes: env.maxUploadBytes,
     secretInBrowser: false,
+    serverDeletionEnabled: env.cloudinary.configured,
   });
 });

@@ -170,34 +170,14 @@ export class ApiClient {
 
 export const api = new ApiClient();
 
-export interface SignedUploadParams {
-  publicId: string;
-  signature: string;
-  apiKey: string;
-  cloudName: string;
-  timestamp: number;
-  folder: string;
-  resourceType: 'image' | 'raw';
-  endpoint: string;
-  options?: Record<string, unknown>;
-}
-
-/** Asks the API to sign a privileged upload (private folders, signed URLs). */
-export const requestSignedUpload = (input: {
-  folder: string;
-  publicId: string;
-  resourceType: 'image' | 'raw';
-  accessMode?: 'public' | 'authenticated' | 'private';
-  fileSizeBytes?: number;
-  mimeType?: string;
-  metadata?: Record<string, string>;
-}): Promise<SignedUploadParams> => api.request<SignedUploadParams>('/media/sign', { method: 'POST', body: input });
-
-export const requestSignedUrl = (input: { publicId: string; resourceType: 'image' | 'raw'; expiresIn?: number }): Promise<{
-  url: string;
-  expiresAt: string;
-}> => api.request('/media/sign-url', { method: 'POST', body: input });
-
+/**
+ * Server-side deletion of a Cloudinary asset.
+ *
+ * A browser cannot delete a Cloudinary asset without the API secret, which by
+ * design never reaches the client. The record is removed from MAMA CARE either
+ * way; this call only tidies the media library when the API service has the
+ * server credentials configured.
+ */
 export const requestAssetDeletion = (input: { publicId: string; resourceType: 'image' | 'raw'; reason?: string }): Promise<{
   deleted: boolean;
 }> => api.request('/media/delete', { method: 'POST', body: input });

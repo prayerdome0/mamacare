@@ -6,7 +6,7 @@ import { useNavScope } from '@/components/layout/nav-scope';
 import { Card, StatCard } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { DataTable, type Column } from '@/components/ui/table';
-import { EmptyState, ErrorState, NoticeState, StatusBadge } from '@/components/ui/display';
+import { Badge, EmptyState, ErrorState, NoticeState } from '@/components/ui/display';
 import { SegmentedControl } from '@/components/ui/tabs';
 import { SearchInput, Switch } from '@/components/ui/form';
 import { useConfirm, useSession } from '@/providers/app-providers';
@@ -15,9 +15,20 @@ import { services } from '@/services/session-store';
 import { useToast } from '@/components/ui/toast';
 import { formatDate, humanize, relativeTime, toIsoDate } from '@/lib/utils';
 import { APPOINTMENT_TYPE_LABELS, type Appointment } from '@/types/domain';
+import { REVIEW_LABELS, REVIEW_TONES, reviewStatus, type ReviewStatus } from '@/services/clinical/reminder-engine';
 import { AppointmentDialog } from '@/routes/app/appointment-dialog';
 
-type Range = 'today' | 'upcoming' | 'overdue' | 'missed' | 'all';
+/**
+ * `overdue` is kept as an alias for `missed` so old links and the scheduled
+ * worker's notification link still land somewhere sensible.
+ */
+type Range = 'today' | 'upcoming' | 'completed' | 'missed' | 'all';
+const RANGE_ALIASES: Record<string, Range> = { overdue: 'missed' };
+const RANGE_STATUS: Record<Exclude<Range, 'all' | 'missed'>, ReviewStatus> = {
+  today: 'TODAY',
+  upcoming: 'UPCOMING',
+  completed: 'COMPLETED',
+};
 
 /**
  * Appointment register. Status changes go through the data layer, which records
@@ -30,7 +41,8 @@ export default function AppointmentsPage() {
   const { actor, permissions } = useSession();
   const toast = useToast();
   const confirm = useConfirm();
-  const [range, setRange] = useState<Range>((params.get('range') as Range) ?? 'today');
+  const requested = params.get('range') ?? '';
+  const [range, setRange] = useState<Range>(RANGE_ALIASES[requested] ?? (requested as Range) ?? 'today');
   const [term, setTerm] = useState('');
   const [mineOnly, setMineOnly] = useState(false);
   const [dialog, setDialog] = useState<{ open: boolean; appointment: Appointment | null }>({ open: false, appointment: null });
@@ -51,31 +63,38 @@ export default function AppointmentsPage() {
     return (live.data as Appointment[]).filter((row) => {
       if (mineOnly && actor && row.assignedUserId !== actor.uid) return false;
       if (needle && !`${row.motherName} ${row.patientId}`.toLowerCase().includes(needle)) return false;
-      switch (range) {
-        case 'today':
-          return row.scheduledFor === today && (row.status === 'SCHEDULED' || row.status === 'CONFIRMED');
-        case 'upcoming':
-          return row.scheduledFor > today && (row.status === 'SCHEDULED' || row.status === 'CONFIRMED');
-        case 'overdue':
-          return row.scheduledFor < today && (row.status === 'SCHEDULED' || row.status === 'CONFIRMED');
-        case 'missed':
-          return row.status === 'MISSED' || row.status === 'CANCELLED';
-        default:
-          return true;
-      }
+      // The lifecycle status is derived from the calendar, so a review whose
+      // date passed shows as missed even before the sweep has written it back.
+      if (range === 'all') return true;
+      const status = reviewStatus(row, today);
+      if (range === 'missed') return status === 'MISSED' || status === 'CANCELLED';
+      return status === RANGE_STATUS[range];
     });
   }, [live.data, range, today, search, mineOnly, actor]);
 
   const counts = useMemo(() => {
-    const all = live.data as Appointment[];
-    const open = all.filter((row) => row.status === 'SCHEDULED' || row.status === 'CONFIRMED');
-    return {
-      today: open.filter((row) => row.scheduledFor === today).length,
-      upcoming: open.filter((row) => row.scheduledFor > today).length,
-      overdue: open.filter((row) => row.scheduledFor < today).length,
-      missed: all.filter((row) => row.status === 'MISSED' || row.status === 'CANCELLED').length,
-      all: all.length,
-    };
+    const tally = { today: 0, upcoming: 0, missed: 0, completed: 0, all: 0 };
+    for (const row of live.data as Appointment[]) {
+      tally.all += 1;
+      switch (reviewStatus(row, today)) {
+        case 'TODAY':
+          tally.today += 1;
+          break;
+        case 'UPCOMING':
+          tally.upcoming += 1;
+          break;
+        case 'COMPLETED':
+          tally.completed += 1;
+          break;
+        case 'MISSED':
+        case 'CANCELLED':
+          tally.missed += 1;
+          break;
+        default:
+          break;
+      }
+    }
+    return tally;
   }, [live.data, today]);
 
   const act = async (row: Appointment, status: Appointment['status']) => {
@@ -102,11 +121,12 @@ export default function AppointmentsPage() {
   const processQueue = async () => {
     setBusy('queue');
     try {
-      const sweep = await services().data.sweepMissedAppointments(actor?.facilityId ?? null);
-      const reminders = await services().data.sendDueReminders(actor?.facilityId ?? null);
+      const result = await services().data.runReminderPass(actor?.facilityId ?? null);
       toast.success(
-        'Queue processed',
-        `${sweep.updated} appointment${sweep.updated === 1 ? '' : 's'} marked missed · ${reminders.sent} reminder${reminders.sent === 1 ? '' : 's'} queued for delivery.`,
+        'Reminders processed',
+        result.missed === 0 && result.reminders === 0
+          ? 'Nothing was due. A review is flagged missed the day after its date, and reminded on the day itself.'
+          : `${result.missed} review${result.missed === 1 ? '' : 's'} marked missed · ${result.reminders} reminder${result.reminders === 1 ? '' : 's'} sent to mothers.`,
       );
       void live.refresh();
       void queue.run();
@@ -163,7 +183,7 @@ export default function AppointmentsPage() {
       header: 'Status',
       render: (row) => (
         <div className="space-y-1">
-          <StatusBadge status={row.status} />
+          <Badge tone={REVIEW_TONES[reviewStatus(row, today)]}>{REVIEW_LABELS[reviewStatus(row, today)]}</Badge>
           {row.completedVisitId ? <p className="caption">visit recorded</p> : null}
           {row.cancelledReason ? <p className="caption line-clamp-1">{row.cancelledReason}</p> : null}
         </div>
@@ -199,7 +219,7 @@ export default function AppointmentsPage() {
   return (
     <AppShell
       title="Appointments"
-      subtitle={`${counts.today} today · ${counts.upcoming} upcoming · ${counts.overdue} overdue`}
+      subtitle={`${counts.today} today · ${counts.upcoming} upcoming · ${counts.missed} missed · ${counts.completed} completed`}
       actions={
         <>
           <Button size="sm" variant="secondary" loading={busy === 'queue'} onClick={() => void processQueue()} icon={<BellRing className="size-4" aria-hidden />}>
@@ -219,8 +239,8 @@ export default function AppointmentsPage() {
       <div className="mb-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard label="Today" value={counts.today} hint="Awaiting attendance" tone={counts.today > 0 ? 'brand' : 'default'} icon={<CalendarClock className="size-4" aria-hidden />} />
         <StatCard label="Upcoming" value={counts.upcoming} hint="Scheduled ahead" />
-        <StatCard label="Overdue" value={counts.overdue} hint="Past due, not yet marked" tone={counts.overdue > 0 ? 'amber' : 'green'} />
         <StatCard label="Missed or cancelled" value={counts.missed} hint="Each missed visit raises a follow-up alert" tone={counts.missed > 0 ? 'red' : 'default'} />
+        <StatCard label="Completed" value={counts.completed} hint="Review attended and recorded" tone="green" />
       </div>
 
       <Card className="mb-4" bodyClassName="p-3 sm:p-4">
@@ -237,8 +257,8 @@ export default function AppointmentsPage() {
             options={[
               { value: 'today', label: 'Today', count: counts.today },
               { value: 'upcoming', label: 'Upcoming', count: counts.upcoming },
-              { value: 'overdue', label: 'Overdue', count: counts.overdue },
               { value: 'missed', label: 'Missed', count: counts.missed },
+              { value: 'completed', label: 'Completed', count: counts.completed },
               { value: 'all', label: 'All', count: counts.all },
             ]}
           />
@@ -259,9 +279,9 @@ export default function AppointmentsPage() {
             icon={<CalendarPlus className="size-5" aria-hidden />}
             title={range === 'today' ? 'Nothing booked for today' : 'No appointments in this view'}
             description={
-              range === 'overdue'
-                ? 'No appointment has passed without being marked. Run “Process reminders” at the start of a shift to sweep the register.'
-                : 'Book an appointment to start the reminder cycle: in-app push to the mother’s device and SMS where enabled.'
+              range === 'missed'
+                ? 'No review has passed without an outcome. Reminders run automatically each morning and whenever a clinician opens the workspace.'
+                : 'Book a review to start the reminder cycle: the mother is told the date in advance, reminded on the day, and contacted the day after if it is missed.'
             }
             action={
               permissions.canScheduleAppointment ? (

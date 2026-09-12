@@ -9,7 +9,7 @@
  */
 
 const DB_NAME = 'mamacare-local';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 export const STORES = [
   'users',
@@ -29,6 +29,10 @@ export const STORES = [
   'devices',
   'facility_assignments',
   'settings',
+  'messages',
+  'announcements',
+  'services',
+  'outbox',
   'blobs',
   'meta',
 ] as const;

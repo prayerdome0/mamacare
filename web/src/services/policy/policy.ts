@@ -424,6 +424,9 @@ export interface UiPermissions {
   canGenerateReports: boolean;
   canViewFacilityReports: boolean;
   canManageEducation: boolean;
+  canMessageIndividuals: boolean;
+  canAnnounce: boolean;
+  canManageServices: boolean;
   canManageUsers: boolean;
   canAssignRoles: boolean;
   canManageFacilities: boolean;
@@ -450,6 +453,9 @@ export function permissionsFor(actor: Actor | null): UiPermissions {
     canGenerateReports: staff,
     canViewFacilityReports: supervisor || admin,
     canManageEducation: supervisor,
+    canMessageIndividuals: staff,
+    canAnnounce: supervisor,
+    canManageServices: admin,
     canManageUsers: admin,
     canAssignRoles: admin,
     canManageFacilities: admin,

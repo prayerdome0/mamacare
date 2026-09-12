@@ -2,22 +2,31 @@
  * The one way this product renders an image.
  *
  * Every image — the sixteen maternal-health photographs as well as uploads — goes
- * through this component, so lazy loading, `srcSet`, Cloudinary delivery
- * parameters, an aspect-ratio placeholder (no layout shift) and a readable
- * fallback are applied consistently.
+ * through this component, so lazy loading, `srcSet`, delivery parameters, an
+ * aspect-ratio placeholder (no layout shift) and a readable fallback are applied
+ * consistently.
+ *
+ * Resolution order, so an image can never 404 silently:
+ *  1. an absolute URL, data/blob URL or bundled `/images/...` path is used as-is;
+ *  2. `firebase:…` / `device:…` identifiers are resolved through the media
+ *     service (Firebase Storage download URL, or this browser's blob store);
+ *  3. a bare Cloudinary public id is delivered from the media-library root —
+ *     no folder prefix is ever added;
+ *  4. on any failure the bundled file is tried once, then a labelled fallback
+ *     frame is rendered. The page never shows a broken image icon.
  */
 
 import { useEffect, useRef, useState } from 'react';
 import { ImageOff } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { buildSrcSet } from '@/services/media/cloudinary';
+import { buildImageUrl, buildSrcSet, isDirectUrl } from '@/services/media/cloudinary';
 import { APP_IMAGES, type AppImageKey } from '@/services/media/app-images';
-import { resolveAssetUrl } from '@/services/media/cloudinary';
+import { cloudinaryConfig } from '@/config/env';
 
 export interface AppImageProps {
-  /** Key of one of the ten maternal-health images. */
+  /** Key of one of the sixteen bundled maternal-health images. */
   name?: AppImageKey;
-  /** Or an explicit Cloudinary public id / absolute URL / device handle. */
+  /** Or an explicit URL / Cloudinary public id / `firebase:` handle. */
   src?: string | null;
   alt?: string;
   caption?: string;
@@ -57,41 +66,50 @@ export function AppImage({
   const fallbackAlt = defined?.alt ?? 'Photograph';
   const [loaded, setLoaded] = useState(false);
   const [failed, setFailed] = useState(false);
-  const [resolved, setResolved] = useState<string | null>(src ?? defined?.localSrc ?? null);
+  const [resolved, setResolved] = useState<string | null>(() => initialSource(src, defined?.localSrc ?? null));
   const holderRef = useRef<HTMLDivElement | null>(null);
   const [inView, setInView] = useState(priority);
 
-  // Public/branding assets render straight from their Cloudinary URL when the
-  // environment provides one; the bundled copy is the fallback, not a decorator.
+  /**
+   * Anything that is not a ready-to-use address has to be resolved
+   * asynchronously: Firebase Storage hands out a URL per request, and device
+   * blobs become object URLs.
+   */
   useEffect(() => {
     let cancelled = false;
-    const explicit = src ?? defined?.publicId ?? null;
-    if (!explicit) return;
-    if (explicit.startsWith('http') || explicit.startsWith('data:') || explicit.startsWith('/')) {
-      setResolved(explicit);
+    const identifier = src ?? defined?.remotePublicId ?? null;
+
+    if (!identifier) {
+      setResolved(defined?.localSrc ?? null);
       return;
     }
-    if (explicit.startsWith('device:')) {
-      void resolveAssetUrl({ localHandle: explicit.slice('device:'.length), accessMode: 'authenticated' })
-        .then((url) => !cancelled && setResolved(url))
-        .catch(() => !cancelled && setFailed(true));
+    if (isDirectUrl(identifier)) {
+      setResolved(identifier);
       return;
     }
-    // Cloudinary public id
-    void (async () => {
-      try {
-        const { buildImageUrl: build } = await import('@/services/media/cloudinary');
-        const url = build(explicit, { width: 1280, quality: 'auto', format: 'auto' });
-        if (cancelled) return;
-        setResolved(url || defined?.localSrc || null);
-      } catch {
-        if (!cancelled) setResolved(defined?.localSrc ?? null);
-      }
-    })();
+    if (identifier.startsWith('firebase:') || identifier.startsWith('device:')) {
+      setFailed(false);
+      void import('@/services/media/cloudinary')
+        .then(({ resolveAssetUrl }) => resolveAssetUrl({ publicId: identifier }))
+        .then((url) => {
+          if (!cancelled) setResolved(url);
+        })
+        .catch(() => {
+          if (!cancelled) setFailed(true);
+        });
+      return;
+    }
+    // A bare Cloudinary public id. Delivered from the media-library root; if
+    // Cloudinary is not configured, fall back to the bundled file.
+    if (cloudinaryConfig.enabled) {
+      setResolved(buildImageUrl(identifier, { width: 1280, quality: 'auto', format: 'auto' }));
+    } else {
+      setResolved(defined?.localSrc ?? null);
+    }
     return () => {
       cancelled = true;
     };
-  }, [src, defined?.publicId, defined?.localSrc]);
+  }, [src, defined?.remotePublicId, defined?.localSrc]);
 
   useEffect(() => {
     if (inView || !holderRef.current) return;
@@ -108,27 +126,22 @@ export function AppImage({
     return () => observer.disconnect();
   }, [inView]);
 
-  const cloudinaryId = !src || (!src.startsWith('/') && !src.startsWith('http') && !src.startsWith('data:') && !src.startsWith('device:'))
-    ? (src ?? defined?.publicId ?? null)
-    : null;
+  const remoteId = src && !isDirectUrl(src) && !src.startsWith('firebase:') && !src.startsWith('device:') ? src : defined?.remotePublicId ?? null;
   const widths = defined?.widths ?? [];
-  const srcSet = !failed && cloudinaryId && widths.length > 0
-    ? buildSrcSet(cloudinaryId, widths, { quality: 'auto', format: 'auto' })
-    : undefined;
+  const srcSet =
+    !failed && remoteId && widths.length > 0 && cloudinaryConfig.enabled
+      ? buildSrcSet(remoteId, widths, { quality: 'auto', format: 'auto' })
+      : undefined;
 
-  if (failed) {
-    return (
-      <figure className={cn('flex flex-col gap-2', className)}>
-        <div className={cn('grid place-items-center bg-ink-100 text-ink-400', rounded && 'rounded-[var(--radius-lg)]')} style={{ aspectRatio: ratio }} role="img" aria-label={`${fallbackAlt} (image unavailable)`}>
-          <span className="flex flex-col items-center gap-1.5 px-4 text-center">
-            <ImageOff className="size-6" aria-hidden />
-            <span className="micro">Image unavailable</span>
-          </span>
-        </div>
-        {caption ? <figcaption className="caption">{caption}</figcaption> : null}
-      </figure>
-    );
-  }
+  // The bundled copy is the last resort before the labelled fallback frame.
+  const onError = (): void => {
+    const bundled = defined?.localSrc ?? null;
+    if (bundled && resolved !== bundled) {
+      setResolved(bundled);
+      return;
+    }
+    setFailed(true);
+  };
 
   return (
     <figure className={cn('flex flex-col gap-2', className)}>
@@ -137,8 +150,18 @@ export function AppImage({
         className={cn('relative overflow-hidden bg-ink-100', rounded && 'rounded-[var(--radius-lg)]')}
         style={{ aspectRatio: ratio }}
       >
-        {!loaded ? <div className="skeleton absolute inset-0" aria-hidden /> : null}
-        {inView && resolved ? (
+        {!loaded && !failed ? <div className="skeleton absolute inset-0" aria-hidden /> : null}
+
+        {failed ? (
+          <div className="absolute inset-0 grid place-items-center bg-gradient-to-br from-brand-50 to-ink-100 text-ink-400" role="img" aria-label={`${fallbackAlt} (image unavailable)`}>
+            <span className="flex flex-col items-center gap-1.5 px-4 text-center">
+              <ImageOff className="size-6" aria-hidden />
+              <span className="micro">Image unavailable</span>
+            </span>
+          </div>
+        ) : null}
+
+        {!failed && inView && resolved ? (
           <img
             src={resolved}
             srcSet={srcSet}
@@ -149,15 +172,7 @@ export function AppImage({
             {...({ fetchpriority: priority ? 'high' : undefined } as any)}
             decoding={priority ? 'sync' : 'async'}
             onLoad={() => setLoaded(true)}
-            onError={() => {
-              // A Cloudinary URL can fail (deleted asset, blocked network). Fall
-              // back to the bundled copy exactly once before giving up.
-              if (resolved !== defined?.localSrc && defined?.localSrc) {
-                setResolved(defined.localSrc);
-              } else {
-                setFailed(true);
-              }
-            }}
+            onError={onError}
             className={cn(
               'size-full transition-opacity duration-500',
               fit === 'cover' ? 'object-cover' : 'object-contain',
@@ -166,6 +181,7 @@ export function AppImage({
             )}
           />
         ) : null}
+
         {overlay ? (
           <div
             className={cn('pointer-events-none absolute inset-0', overlay === 'gradient' ? 'bg-gradient-to-t from-ink-950/85 via-ink-950/35 to-transparent' : 'bg-ink-950/35')}
@@ -176,6 +192,13 @@ export function AppImage({
       {caption ? <figcaption className="caption">{caption}</figcaption> : null}
     </figure>
   );
+}
+
+/** Bundled paths and absolute URLs render immediately; identifiers do not. */
+function initialSource(src: string | null | undefined, bundled: string | null): string | null {
+  if (!src) return bundled;
+  if (isDirectUrl(src)) return src;
+  return bundled;
 }
 
 export function AppImageCard({

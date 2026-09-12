@@ -982,6 +982,14 @@ export const AUDIT_ACTIONS = [
   'document.accessed',
   'document.deleted',
   'notification.sent',
+  'announcement.created',
+  'announcement.sent',
+  'announcement.updated',
+  'announcement.deleted',
+  'message.sent',
+  'service.created',
+  'service.updated',
+  'service.deleted',
   'settings.updated',
   'rule.updated',
   'media.uploaded',
@@ -1010,6 +1018,9 @@ export interface AuditLogEntry {
     | 'rule'
     | 'settings'
     | 'media'
+    | 'message'
+    | 'announcement'
+    | 'service'
     | 'session';
   targetId: string;
   targetLabel?: string | null;
@@ -1077,6 +1088,134 @@ export interface SystemSettings {
   updatedAt: string;
   updatedBy: string;
 }
+
+/* ── Direct messages ─────────────────────────────────────────────────── */
+
+/**
+ * A one-to-one message between a member of staff (or an administrator) and one
+ * recipient.
+ *
+ * Every message names both participants in `participantIds` so Firestore rules
+ * can enforce "you may only read a thread you are part of" with a single
+ * `array-contains` — no server round-trip, no trusting the client.
+ */
+export interface Message {
+  id: string;
+  /** Stable thread key: the two participant ids sorted and joined. */
+  threadId: string;
+  senderId: string;
+  senderName: string;
+  senderRole: Role;
+  recipientId: string;
+  recipientName: string;
+  participantIds: string[];
+  subject?: string | null;
+  body: string;
+  /** Optional pointer to the patient or review the message is about. */
+  motherId?: string | null;
+  appointmentId?: string | null;
+  facilityId?: string | null;
+  readAt?: string | null;
+  /** Set when the sender is a facility team writing as the facility, not as themselves. */
+  facilityWide?: boolean;
+  createdAt: string;
+  createdBy: string;
+}
+
+export interface MessageThread {
+  threadId: string;
+  participantIds: string[];
+  /** The other person, from the point of view of whoever asked. */
+  otherId: string;
+  otherName: string;
+  otherRole: Role;
+  lastMessage: string;
+  lastMessageAt: string;
+  unread: number;
+}
+
+/* ── Announcements ───────────────────────────────────────────────────── */
+
+export type AnnouncementAudience = 'EVERYONE' | 'STAFF' | 'MOTHERS' | 'FACILITY' | 'INDIVIDUALS';
+
+export type AnnouncementStatus = 'DRAFT' | 'SENT' | 'SCHEDULED' | 'CANCELLED';
+
+/**
+ * A managed notice. Unlike a one-off notification this row is kept: it is what
+ * the administrator edits, re-sends and reviews the delivery of, and what the
+ * public "important announcements" strip reads.
+ */
+export interface Announcement {
+  id: string;
+  title: string;
+  body: string;
+  audience: AnnouncementAudience;
+  /** Only meaningful when `audience` is FACILITY. */
+  facilityId?: string | null;
+  /** Only meaningful when `audience` is INDIVIDUALS. */
+  recipientIds?: string[];
+  level: 'info' | 'success' | 'warning' | 'critical';
+  /** Shown on the public site and the mother's portal when true. */
+  published: boolean;
+  pinned: boolean;
+  link?: string | null;
+  status: AnnouncementStatus;
+  /** ISO timestamp; the scheduled function sends it then. */
+  scheduledFor?: string | null;
+  sentAt?: string | null;
+  recipients: number;
+  createdAt: string;
+  createdBy: string;
+  createdByName: string;
+  updatedAt?: string | null;
+}
+
+/* ── Services ────────────────────────────────────────────────────────── */
+
+/**
+ * A maternal-health service the facility offers. Shown on the public site's
+ * services section and used when booking, so the catalogue is real data rather
+ * than a hard-coded list of cards.
+ */
+export interface ServiceOffering {
+  id: string;
+  name: string;
+  summary: string;
+  description?: string | null;
+  /** Lucide icon name, or null for the default heart mark. */
+  icon?: string | null;
+  category: 'ANTENATAL' | 'DELIVERY' | 'POSTNATAL' | 'NEWBORN' | 'EDUCATION' | 'LABORATORY' | 'REFERRAL' | 'OUTREACH' | 'OTHER';
+  facilityIds: string[];
+  /** Booking-facing details. */
+  durationMinutes?: number | null;
+  requiresAppointment: boolean;
+  available: boolean;
+  /** Lower sorts first. */
+  sortOrder: number;
+  createdAt: string;
+  createdBy: string;
+  updatedAt?: string | null;
+}
+
+export const SERVICE_CATEGORY_LABELS: Record<ServiceOffering['category'], string> = {
+  ANTENATAL: 'Antenatal care',
+  DELIVERY: 'Delivery and maternity',
+  POSTNATAL: 'Postnatal care',
+  NEWBORN: 'Newborn care',
+  EDUCATION: 'Health education',
+  LABORATORY: 'Laboratory',
+  REFERRAL: 'Referral and transport',
+  OUTREACH: 'Community outreach',
+  OTHER: 'Other',
+};
+
+export const ANNOUNCEMENT_AUDIENCE_LABELS: Record<AnnouncementAudience, string> = {
+  EVERYONE: 'Everyone',
+  STAFF: 'Health workers only',
+  MOTHERS: 'Mothers only',
+  FACILITY: 'One facility',
+  INDIVIDUALS: 'Selected people',
+};
 
 /* ── Shared query/persistence types ──────────────────────────────────── */
 

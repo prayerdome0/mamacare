@@ -5,7 +5,6 @@ import {
   AlertTriangle,
   Boxes,
   Check,
-  Database,
   KeyRound,
   RefreshCw,
   Settings2,
@@ -26,8 +25,8 @@ import { useSession } from '@/providers/app-providers';
 import { services } from '@/services/session-store';
 import { computeStats } from '@/services/dashboard/dashboard-service';
 import { approvePendingUser, listUsers } from '@/services/admin/user-admin';
-import { DEMO_ACCOUNTS, seedDemonstrationData, type SeedSummary } from '@/services/demo/dataset';
 import { integrations } from '@/config/env';
+import { SetupChecklist } from '@/components/layout/setup-checklist';
 import { formatDate, relativeTime } from '@/lib/utils';
 import { BarChart, DonutChart } from '@/components/charts';
 import { ROLE_LABELS, type Facility, type Role } from '@/types/domain';
@@ -39,7 +38,7 @@ import type { UserDirectoryRow } from '@/services/admin/user-admin';
  * state of every optional integration.
  */
 export default function AdminDashboard() {
-  const { providerKind, refresh } = useSession();
+  const { refresh } = useSession();
   const toast = useToast();
   const stats = useAsync(() => computeStats({ facilityId: null, months: 6 }), {});
   const pending = useAsync(() => listUsers({ status: 'PENDING_APPROVAL' }), {});
@@ -49,8 +48,6 @@ export default function AdminDashboard() {
 
   const [decisions, setDecisions] = useState<Record<string, { role: Role; facilityId: string }>>({});
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [seeding, setSeeding] = useState(false);
-  const [seedResult, setSeedResult] = useState<SeedSummary | null>(null);
 
   const reload = () => {
     void stats.run();
@@ -87,20 +84,6 @@ export default function AdminDashboard() {
       toast.error(error, 'Could not process the request');
     } finally {
       setBusyId(null);
-    }
-  };
-
-  const seed = async () => {
-    setSeeding(true);
-    try {
-      const summary = await seedDemonstrationData({ force: false });
-      setSeedResult(summary);
-      toast.success('Demonstration data ready', `${summary.mothers} mothers, ${summary.visits} visits and ${summary.alerts} alerts written through the real services.`);
-      reload();
-    } catch (error) {
-      toast.error(error, 'Seeding failed');
-    } finally {
-      setSeeding(false);
     }
   };
 
@@ -162,6 +145,8 @@ export default function AdminDashboard() {
       }
     >
       {stats.error ? <div className="mb-4"><ErrorState message={stats.error} onRetry={reload} /></div> : null}
+
+      <SetupChecklist className="mb-4" />
 
       <div className="mb-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard label="Mothers in care" value={stats.data?.totals.mothers ?? '—'} hint="Active records across all facilities" loading={stats.loading} icon={<Users className="size-4" aria-hidden />} onClick={() => undefined} />
@@ -289,35 +274,6 @@ export default function AdminDashboard() {
               <IntegrationRow label="Push messaging" ok={integrations.push.configured} detail={integrations.push.configured ? 'VAPID key present' : 'VITE_FIREBASE_VAPID_KEY not set'} />
               <IntegrationRow label="Signed uploads API" ok={integrations.provider !== 'local'} detail="The Cloudinary API secret lives only on the server" />
             </ul>
-            {providerKind === 'local' ? (
-              <div className="mt-3 space-y-2">
-                <NoticeState tone="info" title="Device storage mode" compact>
-                  The full stack — policy, alert engine, referral workflow, reports — runs against IndexedDB so the platform can be exercised without cloud
-                  credentials. Add the Firebase values to <code className="rounded bg-white/70 px-1">web/.env.local</code> and restart to switch the data layer.
-                </NoticeState>
-                <Button size="sm" variant="secondary" loading={seeding} onClick={() => void seed()} icon={<Database className="size-4" aria-hidden />}>
-                  Seed demonstration records
-                </Button>
-                {seedResult ? (
-                  <p className="caption">
-                    Seeded {seedResult.mothers} mothers, {seedResult.pregnancies} pregnancies, {seedResult.visits} visits, {seedResult.alerts} alerts and{' '}
-                    {seedResult.appointments} appointments across {seedResult.facilities} facilities. Sign in with any account below.
-                  </p>
-                ) : null}
-                <ul className="rounded-lg border border-ink-200 bg-ink-50 p-2.5">
-                  {DEMO_ACCOUNTS.map((account) => (
-                    <li key={account.email} className="flex items-center justify-between gap-2 py-0.5 text-[0.78rem]">
-                      <span className="truncate text-ink-700">{account.email}</span>
-                      <Badge tone="neutral">{ROLE_LABELS[account.role]}</Badge>
-                    </li>
-                  ))}
-                </ul>
-                <p className="caption">
-                  These are demonstration accounts for this device only, with the shared password documented in <code>web/.env.example</code>. Delete the
-                  IndexedDB database to reset.
-                </p>
-              </div>
-            ) : null}
           </Card>
 
           <Card title="Last platform activity" description="Audit entries are append-only; opening the log shows the full history." actions={<Link to="/admin/audit" className="text-[0.78rem] font-semibold text-brand-800 hover:underline">Full log</Link>} bodyClassName="p-0">

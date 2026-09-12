@@ -91,8 +91,6 @@ export const app = {
     .split(',')
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean),
-  /** Local (device) provider only: seed a demonstration dataset on first run. */
-  demoSeed: str(raw.VITE_LOCAL_DEMO_SEED).toLowerCase() !== 'false',
   fcmVapidKey: str(raw.VITE_FIREBASE_VAPID_KEY),
 };
 
