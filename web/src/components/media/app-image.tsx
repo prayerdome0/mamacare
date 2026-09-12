@@ -1,7 +1,7 @@
 /**
  * The one way this product renders an image.
  *
- * Every image — the ten maternal-health photographs as well as uploads — goes
+ * Every image — the sixteen maternal-health photographs as well as uploads — goes
  * through this component, so lazy loading, `srcSet`, Cloudinary delivery
  * parameters, an aspect-ratio placeholder (no layout shift) and a readable
  * fallback are applied consistently.

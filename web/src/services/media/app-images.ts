@@ -1,5 +1,5 @@
 /**
- * The ten primary MAMA CARE images.
+ * The sixteen primary MAMA CARE images.
  *
  * Each entry names the Cloudinary public id (folder `mamacare/public`, which the
  * upload script creates automatically) and a local fallback that ships with the
@@ -18,7 +18,13 @@ export type AppImageKey =
   | 'clinicEnvironment'
   | 'maternalEducation'
   | 'appointmentCheckin'
-  | 'aboutPlatform';
+  | 'aboutPlatform'
+  | 'referralTransport'
+  | 'obstetricUltrasound'
+  | 'laboratoryTesting'
+  | 'newbornWeighing'
+  | 'mobileReminder'
+  | 'outreachVisit';
 
 export interface AppImageDefinition {
   key: AppImageKey;
@@ -125,6 +131,60 @@ export const APP_IMAGES: Record<AppImageKey, AppImageDefinition> = {
     caption: 'Facility and district oversight on one record',
     aspect: [3, 2],
     widths: [640, 960, 1280],
+  },
+  referralTransport: {
+    key: 'referralTransport',
+    publicId: 'mamacare/public/referral-transport',
+    localSrc: '/images/referral-transport.jpg',
+    alt: 'Nurse helping a pregnant woman into a clinic referral vehicle while a companion holds her bag',
+    caption: 'The referral journey: escorted transport to the receiving facility',
+    aspect: [3, 2],
+    widths: [480, 720, 960],
+  },
+  obstetricUltrasound: {
+    key: 'obstetricUltrasound',
+    publicId: 'mamacare/public/obstetric-ultrasound',
+    localSrc: '/images/obstetric-ultrasound.jpg',
+    alt: 'Sonographer performing an obstetric ultrasound scan on a pregnant woman',
+    caption: 'Dating and growth scans documented on the visit',
+    aspect: [3, 2],
+    widths: [480, 720, 960],
+  },
+  laboratoryTesting: {
+    key: 'laboratoryTesting',
+    publicId: 'mamacare/public/laboratory-testing',
+    localSrc: '/images/laboratory-testing.jpg',
+    alt: 'Laboratory technician examining a rack of blood sample tubes in a clinic laboratory',
+    caption: 'Haemoglobin, malaria and syphilis screening on site',
+    aspect: [3, 2],
+    widths: [480, 720, 960],
+  },
+  newbornWeighing: {
+    key: 'newbornWeighing',
+    publicId: 'mamacare/public/newborn-weighing',
+    localSrc: '/images/newborn-weighing.jpg',
+    alt: 'Nurse weighing a newborn baby on a scale while the mother watches from the bed',
+    caption: 'Day-one weight and newborn check on the postnatal ward',
+    aspect: [3, 2],
+    widths: [480, 720, 960],
+  },
+  mobileReminder: {
+    key: 'mobileReminder',
+    publicId: 'mamacare/public/mobile-reminder',
+    localSrc: '/images/mobile-reminder.jpg',
+    alt: 'Pregnant woman sitting on her doorstep reading an appointment reminder message on her phone',
+    caption: 'Appointment reminders on the mother’s own phone',
+    aspect: [3, 2],
+    widths: [480, 720, 960],
+  },
+  outreachVisit: {
+    key: 'outreachVisit',
+    publicId: 'mamacare/public/outreach-visit',
+    localSrc: '/images/outreach-visit.jpg',
+    alt: 'Community health worker with a visiting bag walking a footpath between rural households',
+    caption: 'Outreach where the road ends',
+    aspect: [3, 2],
+    widths: [480, 720, 960],
   },
 };
 

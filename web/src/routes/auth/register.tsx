@@ -90,7 +90,7 @@ export default function RegisterPage() {
     <AuthLayout
       title="Create your MAMA CARE account"
       intro="Health workers need approval from their facility before any record is visible. Mothers can sign in as soon as the account exists."
-      image="communityWorker"
+      image="mobileReminder"
       wide
       panelTitle="What you are agreeing to"
       panelPoints={[

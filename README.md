@@ -105,7 +105,7 @@ queued with a stated reason. See [`functions/README.md`](functions/README.md).
 
 **Public site** (`/`) — hero, About, Services, Maternal-health guidance, Emergency
 guidance, FAQ, Privacy, Contact. This is the first screen; the sign-in page is a route
-like any other, never a landing wall. Exactly ten primary maternal-health images are used
+like any other, never a landing wall. Exactly sixteen primary maternal-health images are used
 across the site through one reusable `<AppImage>` component (lazy loading, `srcSet`,
 blur-up placeholder, Cloudinary delivery with a local fallback).
 

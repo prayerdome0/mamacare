@@ -77,6 +77,13 @@ export default function EmergencyPage() {
                 </li>
               ))}
             </ol>
+            <div className="mt-5">
+              <AppImage
+                name="referralTransport"
+                ratio="16 / 9"
+                caption="Referral transport waiting at a rural health post — the journey is part of the emergency."
+              />
+            </div>
           </div>
 
           <div className="space-y-5">
