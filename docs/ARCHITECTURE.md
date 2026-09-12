@@ -1,139 +1,139 @@
-# MAMA CARE v2 — Architecture
+# Architecture
 
-## System overview
-
-```
-                    ┌─────────────────────────────────────────────┐
-                    │                Supabase                      │
-┌──────────────┐    │  ┌─────────────┐  ┌──────────────────────┐  │
-│  Android app  │◄──┼──┤  Postgres   │  │  Edge Functions      │  │
-│  (Flutter)    │    │  │  + RLS      │  │  sms-reminders (Deno)│  │
-│  offline-first│    │  └─────────────┘  └──────────┬───────────┘  │
-│  SQLite local │    │  ┌─────────────┐             │              │
-└──────────────┘    │  │ Supabase Auth│             ▼              │
-                    │  │ email/pw     │     SMS gateway (Twilio /  │
-┌──────────────┐    │  └─────────────┘     any HTTP provider)     │
-│  Web dashboard│◄───┼─────────────────────────────────────────────┤
-│  (Next.js)    │    └─────────────────────────────────────────────┘
-│  on Vercel    │
-└──────────────┘
-```
-
-## 1. Data model (PostgreSQL)
-
-Core ownership chain (IDs, never names, are the keys):
+MAMA CARE is one React application plus a small privileged API service. The split is
+deliberate: everything that can be done with a user's own credentials happens in the
+client against a documented provider interface; everything that needs a secret goes
+through the API service.
 
 ```
-users (auth.users)
- ├── profiles        role + facility_id   (auto-created on sign-up)
- └── facilities      district/province
-
-mothers             mother_code MC-000245 (server-assigned, canonical)
- └── pregnancies     LMP → EDD, status lifecycle
-      ├── anc_visits ── vitals
-      │               ── danger_signs
-      │               ── tests
-      │               ── medications
-      ├── appointments  reminder_days, status
-      ├── referrals     full lifecycle incl. receiving-facility updates
-      ├── follow_ups    missed-visit outreach records
-      ├── deliveries    → pregnancy flips to delivered → postnatal
-      └── alerts        raised by the alert engine, status-tracked
+                    ┌───────────────────────────────────────────────┐
+                    │  web/  (React 19 + Vite + Tailwind v4)         │
+                    │                                                │
+   browser ───────► │  routes/      public · auth · /app · /admin · /home │
+                    │  components/  ui kit · layout · charts · media │
+                    │  hooks/       useAsync · useLiveQuery · forms  │
+                    │  services/                                     │
+                    │   ├ data/        provider contract + 2 impls    │
+                    │   ├ policy/      the access matrix (authority)  │
+                    │   ├ clinical/    rules (data) + engine (pure)   │
+                    │   ├ auth/ media/ reports/ dashboard/ admin/     │
+                    │   ├ notifications/ demo/                         │
+                    │   └ api/client.ts ── /api/* ──┐                 │
+                    └────────────────────────────────│────────────────┘
+                                                     │  ID token
+                    ┌────────────────────────────────▼────────────────┐
+                    │  functions/ (Express; Cloud Run or Functions v2) │
+                    │  signed uploads · custom claims · FCM · SMS ·    │
+                    │  audit · contact form · queue drains              │
+                    └───────┬───────────────────┬──────────────────────┘
+                            │                   │
+              ┌─────────────▼──────┐   ┌────────▼─────────────┐
+              │ Cloud Firestore +  │   │ Cloudinary, SMS       │
+              │ Firebase Auth      │   │ provider, FCM         │
+              │ (rules enforced)   │   └───────────────────────┘
+              └────────────────────┘
 ```
 
-Support tables: `alert_rules` (configurable clinical rules), `notifications`,
-`sms_logs`, `audit_logs`.
+## The provider contract
 
-Key design decisions:
+`web/src/services/data/contract.ts` is the seam the whole app is built on:
 
-- **Client-generated UUIDs.** Every row's `id` is a UUIDv4 minted on the device
-  *before* the row exists, so offline records upsert idempotently: retrying the
-  same sync operation never creates duplicates.
-- **`row_version` + `updated_at` triggers.** Every update bumps `row_version`.
-  The sync engine compares versions to detect conflicts.
-- **Soft deletes.** `mothers.deleted_at`; clinical tables are append/update only.
-- **Server-assigned canonical `mother_code`** (`MC-000245` sequence) so two
-  offline devices can never mint the same code. Devices show a provisional
-  code until first sync.
-
-## 2. Offline-first flow (the critical path)
-
-```
-REGISTER / ANC VISIT (no internet)
-   │  1. write row to local SQLite (client UUID)
-   │  2. run alert engine locally (rules cached from alert_rules)
-   │  3. enqueue record in sync_queue
-   ▼
-INTernet returns
-   │  4. SyncEngine drains queue in parent→child order
-   │     (mothers → pregnancies → visits → vitals/signs/tests →
-   │      appointments → referrals → alerts)
-   │  5. idempotent upsert by id  →  ✓ synced
-   │  6. conflict? remote row_version > local → server-wins merge,
-   │     local delta recorded in sync_conflicts for manual review
-   ▼
-Postgres (RLS enforced per row)
+```ts
+interface DataProvider {
+  readonly kind: 'firebase' | 'local';
+  get/list/create/update/remove/subscribe(…, actor)   // every call carries the actor
+  transaction(work: (tx: TxHandle) => Promise<T>): Promise<T>
+}
 ```
 
-Sync status per record: `✓ synced / ⟳ syncing / ⚠ failed (retried with backoff)`.
+Two implementations satisfy it:
 
-## 3. Clinical alert engine
+| | `firebase-provider.ts` | `local/provider.ts` |
+| --- | --- | --- |
+| storage | Cloud Firestore | IndexedDB (`mamacare-local`) |
+| queries | `where`/`orderBy`/`limit` translated from `QuerySpec` | the same `QuerySpec` evaluated by `query-engine.ts` |
+| live data | `onSnapshot` | `store.subscribe` (local writes plus cross-tab `storage` events) |
+| authorisation | `firestore.rules` | `policy.ts` executed on every read and write |
+| transactions | `runTransaction` | staged writes, all-or-nothing commit |
 
-- Rules are **data, not code**: `alert_rules.rule_key, level, message,
-  condition_json` in Postgres. Admins can amend rules when national guidelines
-  change; the app downloads them on sync and evaluates them **locally**, so
-  alerts work offline too.
-- Condition JSON: `{"logic":"any"|"all","criteria":[{"field":"danger_sign","key":"…"}
-  | {"field":"systolic_bp","op":"gte","value":160} | {"field":"weight_loss",…}]}`.
-- Engine output wording is deliberately non-diagnostic:
-  *"Potential danger sign — clinical assessment required."* (RED)
-  *"Concerning finding — clinical review and follow-up required."* (AMBER)
-  The app never names a diagnosis.
-- Every fired rule becomes an `alerts` row (status `open`) → surfaced on the
-  dashboard (`URGENT ALERTS`), the alerts tab, and the supervisor web view.
-  Actions: ASSESS / REFER / DOCUMENT ACTION close the loop with an audit trail.
+`services/session-store.ts` picks the implementation from `config/env.ts`: Firebase when
+the project keys are complete, device storage otherwise, with `VITE_DATA_PROVIDER` as an
+explicit override. No screen, hook or service knows which one is active — that is what makes
+the fallback real rather than a demo mode.
 
-## 4. Roles & security (RLS)
+**Why the device provider exists.** It keeps the clinical workflow testable (registration →
+visit → alerts → referral → report) without a deployed backend, and it doubles as the
+policy's test bench: because the same `policy.ts` gates every local read and write, an
+escalation that would be rejected in production is also rejected here.
 
-| Role | App access | RLS scope |
-|---|---|---|
-| admin | users, facilities, settings, all data | all facilities |
-| midwife / nurse | register, ANC, screening, referrals | own facility |
-| chp (community health worker) | follow-ups, reminders, basic observations | own facility |
-| supervisor | read-only reports & alerts | own district |
-| mother | (phase 2) appointments, education, guidance | own records |
+## Data flow for one ANC visit
 
-- Profiles are auto-provisioned on sign-up with **least privilege** (default `chp`);
-  an admin elevates role/facility.
-- `accessible_facility_ids()` + `pregnancy_visible()` centralize scoping; every
-  clinical table's policies reference them.
-- `sms_logs` and `audit_logs` have **no** client policies — service role only.
-- Sessions: Supabase JWT + client-side inactivity timeout (15 min) + session
-  revocation list (`device/session management` in Phase-2 hardening).
+1. `visit-dialog.tsx` collects structured observations and danger signs; `useForm` +
+   `ancVisitSchema` validate before anything is sent.
+2. `data-layer.createVisit` loads the mother and active pregnancy, allocates the visit
+   number, derives gestational age, and builds the observation snapshot.
+3. `alert-engine.evaluateRules(rules from `alert_rules`, snapshot)` returns matched rules —
+   pure, no I/O, wording copied from the rule rows.
+4. Inside one `provider.transaction`: the visit, the pregnancy risk update, the mother's
+   denormalised snapshot, one alert row per matched rule, notifications for the assigned
+   officer, and the audit entry are written together.
+5. `useLiveQuery` subscribers (roster, dashboard, alert register) update from the snapshot
+   listener; the mother receives the in-app notification and, where configured, a push.
 
-## 5. Reminders
+If step 4 fails anywhere, nothing is written — there is no half-recorded visit.
 
-- `appointments.reminder_days` (default `{7,1}`).
-- In-app: local notifications for the assigned worker.
-- SMS: `supabase/functions/sms-reminders` — internal-token protected, called by
-  Supabase Cron daily; fetches appointments in the next 48 h, sends per-mother
-  reminders, logs to `sms_logs`. Provider is pluggable (`twilio` or generic
-  `http`). The gateway secret lives **only** in the Edge Function.
+## Clinical rules as data
 
-## 6. Web dashboard (Next.js)
+`services/clinical/rules.ts` ships the starting set (`RULES_VERSION = 3`, ~30 rules with
+AND/OR criteria groups and gestational windows). The `alert_rules` collection holds the
+deployment's copy: thresholds, wording, recommended action, enabled flag, version and the
+`approvedBy` / `approvedAt` sign-off fields. Editing a rule in Admin → Settings → Clinical
+rules creates a new version; the alert keeps the `ruleKey` and `ruleVersion` that produced
+it, so a historical alert can always be explained.
 
-- Runs in **demo mode** (deterministic generated data, no credentials) or
-  **live mode** (`NEXT_PUBLIC_SUPABASE_URL` + anon key → RLS-scoped queries).
-- PII minimization: aggregate views mask phone numbers; detailed mother rows
-  are only reachable by staff whose RLS scope covers the facility.
-- Deploy to Vercel with root directory `dashboard/`.
+## Access decisions
 
-## 7. Phases
+`services/policy/policy.ts` answers two questions for every operation — `canReadRow` and
+`canWrite` (evaluated on the merged before+patch row so an update cannot escape its scope) —
+and `permissionsFor` for the UI. The same matrix exists in `firestore.rules` and, for the
+privileged subset, again in the API service's route guards. The three copies are the point of
+`docs/SECURITY-VALIDATION.md`: a change to one must be reflected in the others, with tests.
 
-- **Phase 1 (this repo):** everything above — roles, registration, ANC, vitals,
-  danger signs, alerts, appointments, missed visits, referrals, offline store,
-  sync, basic reports, dashboard.
-- **Phase 2:** mother-facing app, SMS reminders at scale, CHW follow-up workflow
-  polish, delivery module, postnatal care, richer analytics.
-- **Phase 3:** district dashboard, inter-facility referrals, HMIS integration,
-  population-level analytics.
+Roles (`ADMIN`, `FACILITY_SUPERVISOR`, `MIDWIFE`, `NURSE`, `COMMUNITY_HEALTH_WORKER`,
+`MOTHER`) come from Firebase custom claims, written only by the API service. `privilegeVersion`
+in the claims is compared against the profile document on every privileged request, which is
+what makes deactivation and role changes take effect immediately.
+
+## Media
+
+`services/media/cloudinary.ts` owns folder structure (`mamacare/{public,profiles,reports,
+documents,facilities,education,branding}/…`), URL building with `f_auto,q_auto` and srcset,
+and the two upload paths: unsigned preset for public imagery, signed through
+`POST /api/media/sign` for patient documents, reports and portraits. Private assets are
+delivered through short-lived signed URLs requested from `POST /api/media/sign-url`, which
+first resolves the document row that references the public id and applies its access list.
+
+`services/media/blob-store.ts` is the fallback object store used by the device provider, with
+the same keys and folder semantics, so an upload works the same way with or without Cloudinary.
+
+## Rendering and state
+
+* `providers/app-providers.tsx` — session context, toast host, confirm dialog, integration notices.
+* `hooks/index.ts` — `useAsync` (loading/error/retry with a `retryable` flag),
+  `useMutation`, `useLiveQuery` (policy-scoped subscription), `useForm` (schema-backed with
+  dirty tracking and a double-submit guard).
+* `components/layout/shell.tsx` + `nav-scope.tsx` — one shell for staff, admin and mother
+  workspaces; `NavScope` supplies the nav and the link base, which is why `/admin` can mount
+  the same registers as `/app` without duplicating a file.
+* Route-level `React.lazy` chunks per surface; Firestore, jsPDF and Cloudinary code are
+  separate manual chunks (see `web/vite.config.ts`).
+
+## Deliberate omissions
+
+* No Redux or react-query: the provider + hooks layer is the data abstraction, and one
+  policy module must remain the only authority.
+* No mock data source. The only generated content is the clearly labelled demonstration
+  dataset, written through the real services in device mode.
+* No offline write queue in the service worker: only the messaging worker ships
+  (`src/sw/firebase-messaging-sw.ts`, built by `plugins/firebase-sw.ts`).
+* No Firebase Storage — media is Cloudinary's job here, and rules never reference a bucket.
