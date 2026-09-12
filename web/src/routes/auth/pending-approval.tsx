@@ -34,7 +34,7 @@ export default function PendingApprovalPage() {
     <AuthLayout
       title="Your account is awaiting approval"
       intro="The account exists, but no patient record is visible to it yet. A supervisor or administrator at your facility confirms access."
-      image="communityWorker"
+      image="outreachVisit"
       panelTitle="What happens while you wait"
       panelPoints={[
         { label: 'Nothing is readable', detail: 'A pending account cannot open a mother record, an alert, a referral or a report — the rules deny it, not just the menu.' },

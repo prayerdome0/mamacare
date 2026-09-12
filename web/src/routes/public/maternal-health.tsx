@@ -45,6 +45,14 @@ export default function MaternalHealthPage() {
             </article>
           ))}
         </div>
+        <div className="mt-6 grid gap-4 md:grid-cols-2">
+          <AppImage
+            name="obstetricUltrasound"
+            ratio="4 / 3"
+            caption="A dating scan at the first antenatal contact — gestational age is measured, never guessed."
+          />
+          <AppImage name="newbornWeighing" ratio="4 / 3" caption="The day-one weight check, recorded on the same record as the pregnancy." />
+        </div>
       </PublicSection>
 
       <PublicSection eyebrow="Warning signs" title="When to be seen today, not at the next appointment" description="Every one of these needs an examination the same day. None of them is a diagnosis on its own — that is why an assessment is what is required.">

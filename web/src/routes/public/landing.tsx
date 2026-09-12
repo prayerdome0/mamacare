@@ -232,6 +232,37 @@ export default function LandingPage() {
         </div>
       </PublicSection>
 
+      {/* ── Field gallery ─────────────────────────────────────────────── */}
+      <PublicSection
+        eyebrow="In the field"
+        title="The journey the record follows"
+        description="Registration, investigations, referral and follow-up happen in rooms and on roads like these — the moments the MAMA CARE record is built from, from the dating scan to the day-one weight check and the visit that reaches a mother at home."
+      >
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          <AppImage
+            name="referralTransport"
+            ratio="16 / 9"
+            className="md:col-span-2"
+            sizes="(max-width: 768px) 100vw, (max-width: 1280px) 100vw, 640px"
+            caption="A referral leaves complete: escort, transport and the receiving facility told she is coming."
+          />
+          <AppImage name="mobileReminder" ratio="4 / 3" caption="Appointment reminders reach the mother on her own phone." />
+          <AppImage name="obstetricUltrasound" ratio="4 / 3" caption="Dating and growth scans documented on the visit they happened." />
+          <AppImage name="laboratoryTesting" ratio="4 / 3" caption="Haemoglobin, malaria and syphilis screening on site, not on a slip of paper." />
+          <AppImage name="newbornWeighing" ratio="4 / 3" caption="The day-one weight check, on the same record as the pregnancy." />
+          <AppImage
+            name="outreachVisit"
+            ratio="21 / 9"
+            className="md:col-span-2 xl:col-span-3"
+            sizes="(max-width: 768px) 100vw, 1200px"
+            caption="Community follow-up where the road ends — a missed visit is raised for outreach, not forgotten."
+          />
+        </div>
+        <p className="caption mt-5">
+          Illustrative photography for this deployment. No patient data is shown, and no image depicts a real patient or a real record.
+        </p>
+      </PublicSection>
+
       {/* ── Maternal health information ──────────────────────────────── */}
       <PublicSection
         id="maternal-health"
