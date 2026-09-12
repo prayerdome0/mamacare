@@ -1,0 +1,120 @@
+rules_version = '2';
+
+/**
+ * MAMA CARE — Cloud Storage security rules.
+ *
+ * Storage holds everything that must not sit on a public CDN:
+ *
+ *   mamacare/public/…       operator-uploaded site imagery  — world-readable
+ *   mamacare/branding/…     logo and brand assets           — world-readable
+ *   mamacare/profiles/…     user portraits                  — signed-in users
+ *   mamacare/facilities/…   facility photography            — signed-in users
+ *   mamacare/education/…    health-education media          — signed-in users
+ *   mamacare/mothers/…      PATIENT portraits               — clinical staff
+ *   mamacare/documents/…    clinical documents              — clinical staff
+ *   mamacare/reports/…      generated reports               — clinical staff
+ *
+ * The sixteen maternal-health photographs on the public site ship inside the
+ * application bundle (and may optionally be delivered from Cloudinary, flat at
+ * the media-library root), so they never depend on Storage at all.
+ *
+ * Principles, mirroring `firestore.rules`:
+ *  • There is no rule for anything outside `mamacare/`, so it is denied.
+ *  • An anonymous request can only read `public/**` and `branding/**`.
+ *  • Patient data (`mothers`, `documents`, `reports`) is readable only by
+ *    clinical staff and administrators — never by an anonymous visitor and
+ *    never directly by a mother's account. A mother reaches the items shared
+ *    with her through Firestore records that name her explicitly.
+ *  • Uploads are constrained by size and content type at the edge, so a hostile
+ *    client cannot fill the bucket with arbitrary bytes.
+ */
+
+function isSignedIn() {
+  return request.auth != null;
+}
+
+function role() {
+  return isSignedIn() && request.auth.token.role is string
+    ? request.auth.token.role
+    : 'MOTHER';
+}
+
+/** The account must be signed in *and* approved — a pending account has no claim. */
+function isActive() {
+  return isSignedIn() && request.auth.token.accountStatus == 'ACTIVE';
+}
+
+function isAdmin() {
+  return isActive() && role() == 'ADMIN';
+}
+
+/** Roles permitted to handle clinical files. */
+function isClinical() {
+  return isActive() && (
+    role() == 'ADMIN'
+    || role() == 'FACILITY_SUPERVISOR'
+    || role() == 'MIDWIFE'
+    || role() == 'NURSE'
+    || role() == 'COMMUNITY_HEALTH_WORKER'
+  );
+}
+
+/** 20 MB ceiling, applied to every write regardless of who sends it. */
+function withinSize() {
+  return request.resource.size <= 20 * 1024 * 1024;
+}
+
+function isImageType() {
+  return request.resource.contentType.matches('image/(jpeg|jpg|png|webp|avif|heic|gif)');
+}
+
+function isDocumentType() {
+  return isImageType() || request.resource.contentType == 'application/pdf';
+}
+
+match /b/{bucket}/o {
+
+  // ── Public brand and site imagery ──────────────────────────────────
+  match /mamacare/public/{allPaths=**} {
+    allow read: if true;
+    allow write: if isAdmin() && withinSize() && isImageType();
+  }
+
+  match /mamacare/branding/{allPaths=**} {
+    allow read: if true;
+    allow write: if isAdmin() && withinSize() && isImageType();
+  }
+
+  // ── Portraits, facility and education media ────────────────────────
+  match /mamacare/profiles/{allPaths=**} {
+    allow read: if isSignedIn();
+    allow write: if isActive() && withinSize() && isImageType();
+  }
+
+  match /mamacare/facilities/{allPaths=**} {
+    allow read: if isSignedIn();
+    allow write: if isClinical() && withinSize() && isImageType();
+  }
+
+  match /mamacare/education/{allPaths=**} {
+    allow read: if isSignedIn();
+    allow write: if (isAdmin() || (isActive() && role() == 'FACILITY_SUPERVISOR')) && withinSize() && isImageType();
+  }
+
+  /* ── PATIENT DATA ─────────────────────────────────────────────────── */
+
+  match /mamacare/mothers/{allPaths=**} {
+    allow read: if isClinical();
+    allow write: if isClinical() && withinSize() && isImageType();
+  }
+
+  match /mamacare/documents/{allPaths=**} {
+    allow read: if isClinical();
+    allow write: if isClinical() && withinSize() && isDocumentType();
+  }
+
+  match /mamacare/reports/{allPaths=**} {
+    allow read: if isClinical();
+    allow write: if isClinical() && withinSize();
+  }
+}

@@ -14,7 +14,7 @@ import { services } from '@/services/session-store';
 import { cloudinaryConfig } from '@/config/env';
 import {
   deleteAsset,
-  folderPath,
+  storagePathFor,
   resolveAssetUrl,
   uploadAsset,
   type MediaFolder,
@@ -96,7 +96,7 @@ export async function uploadDocument(file: File, context: UploadContext): Promis
       },
       metadata: {
         mamacare_category: context.category,
-        mamacare_folder: folderPath(folder, subFolder),
+        mamacare_folder: storagePathFor(folder, subFolder),
         mamacare_patient: motherPatientId ?? '',
         mamacare_facility: context.facilityId ?? '',
       },
@@ -118,7 +118,7 @@ export async function uploadDocument(file: File, context: UploadContext): Promis
       mimeType: asset.mimeType,
       sizeBytes: asset.bytes,
       publicId: asset.publicId,
-      secureUrl: asset.storage === 'cloudinary' ? asset.secureUrl : null,
+      secureUrl: asset.storage === 'device' ? null : asset.secureUrl,
       localHandle: asset.localHandle ?? null,
       folder: asset.folder,
       version: 1,
@@ -215,7 +215,7 @@ export async function storeReport(input: {
       file,
       folder: 'reports',
       subFolder: input.patientId ?? input.facilityId ?? undefined,
-      tags: [input.type.toLowerCase(), `folder-${folderPath('reports').replace('/', '-')}`],
+      tags: [input.type.toLowerCase(), 'report'],
       context: { report: input.type, scope: input.scope, patient: input.patientId ?? 'aggregate' },
       metadata: {
         mamacare_kind: 'report',
@@ -248,7 +248,7 @@ export async function storeReport(input: {
     file: {
       publicId: asset.publicId,
 
-      secureUrl: asset.storage === 'cloudinary' ? (asset.secureUrl ?? '') : '',
+      secureUrl: asset.storage === 'device' ? '' : (asset.secureUrl ?? ''),
       bytes: asset.bytes,
       localHandle: asset.localHandle ?? null,
       version: asset.version ?? null,

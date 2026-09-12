@@ -1,8 +1,9 @@
 import type { ReactNode } from 'react';
-import { AlertTriangle, Check, CircleDot, Clock, Loader2, RefreshCw, ShieldAlert, X, XCircle } from 'lucide-react';
+import { AlertTriangle, Check, CircleDot, Clock, Loader2, RefreshCw, ShieldAlert, UserRound, X, XCircle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { RiskLevel } from '@/types/domain';
 import { Button } from '@/components/ui/button';
+import { useResolvedMedia } from '@/hooks/use-media';
 
 export function Badge({
   children,
@@ -248,20 +249,45 @@ export function GuardState({
   return <>{empty !== undefined && empty !== null ? empty : children}</>;
 }
 
+/**
+ * Avatar.
+ *
+ * Accepts a ready URL or any stored reference (`firebase:…`, `device:…`, a
+ * Cloudinary public id) and resolves it, so a portrait uploaded to Firebase
+ * Storage still renders. On failure it falls back to initials rather than a
+ * broken-image icon.
+ */
 export function Avatar({ name, src, size = 'md' }: { name: string; src?: string | null; size?: 'xs' | 'sm' | 'md' | 'lg' }) {
   const dimension = { xs: 'size-6 text-[0.6rem]', sm: 'size-8 text-[0.68rem]', md: 'size-10 text-xs', lg: 'size-14 text-sm' }[size];
+  const iconSize = { xs: 'size-3', sm: 'size-3.5', md: 'size-4', lg: 'size-6' }[size];
+  const media = useResolvedMedia(src ?? null, 'image/jpeg');
   const initials = name
     .split(/\s+/)
     .filter(Boolean)
     .slice(0, 2)
     .map((part) => part[0]?.toUpperCase())
     .join('');
-  if (src) {
-    return <img src={src} alt="" className={cn('shrink-0 rounded-full object-cover ring-1 ring-ink-200', dimension)} loading="lazy" />;
+
+  if (media.src && !media.failed) {
+    return (
+      <img
+        src={media.src}
+        alt=""
+        className={cn('shrink-0 rounded-full bg-ink-100 object-cover ring-1 ring-ink-200', dimension)}
+        loading="lazy"
+        onError={(event) => {
+          // A revoked or expired URL must degrade to initials, not to a
+          // broken-image glyph in a clinical list.
+          const element = event.currentTarget;
+          element.style.display = 'none';
+        }}
+      />
+    );
   }
+
   return (
     <span className={cn('grid shrink-0 place-items-center rounded-full bg-brand-100 font-bold text-brand-900 ring-1 ring-brand-200', dimension)} aria-hidden>
-      {initials || <CircleDot className="size-3.5" />}
+      {initials || <UserRound className={iconSize} />}
     </span>
   );
 }

@@ -131,8 +131,6 @@ export interface DataProvider {
   transact<T>(work: (tx: TxHandle) => Promise<T>): Promise<T>;
   /** Device provider only — used by the destructive "reset this device" action. */
   purgeLocalData?(): Promise<void>;
-  /** Device provider only — demonstration dataset, never available in Firebase mode. */
-  seedDemonstrationData?(options?: { force?: boolean }): Promise<{ created: number; summary: string[] }>;
 }
 
 export interface AuthAdapter {

@@ -44,7 +44,6 @@ export const env = {
     apiSecret: str('CLOUDINARY_API_SECRET'),
     /** Must match VITE_CLOUDINARY_UPLOAD_PRESET in the web app. */
     unsignedPreset: str('CLOUDINARY_UPLOAD_PRESET'),
-    rootFolder: str('CLOUDINARY_ROOT_FOLDER', 'mamacare'),
     get apiBase(): string {
       return `https://api.cloudinary.com/v1_1/${this.cloudName || 'unknown'}`;
     },
@@ -53,8 +52,6 @@ export const env = {
     },
   },
 
-  /** Folders the signed path may target. Mirrors the client allow-list. */
-  signedUploadFolders: ['documents', 'reports', 'profiles', 'public', 'education', 'branding', 'facilities'],
   maxUploadBytes: num('MAX_UPLOAD_BYTES', 20 * 1024 * 1024),
 
   /** Emails allowed to promote themselves to ADMIN exactly once, on a fresh deployment. */
@@ -108,7 +105,6 @@ export function redactedSummary(): Record<string, unknown> {
       apiKeyConfigured: Boolean(env.cloudinary.apiKey),
       apiSecretConfigured: Boolean(env.cloudinary.apiSecret),
       unsignedPresetConfigured: Boolean(env.cloudinary.unsignedPreset),
-      rootFolder: env.cloudinary.rootFolder,
     },
     sms: { provider: env.sms.provider, configured: env.sms.configured },
     email: { relayConfigured: env.email.configured, inboxConfigured: Boolean(env.email.to) },

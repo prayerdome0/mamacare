@@ -23,6 +23,7 @@ import { MainMenu, MainMenuButton } from '@/components/layout/main-menu';
 import { useSession } from '@/providers/app-providers';
 import { useNavScope } from '@/components/layout/nav-scope';
 import { useLiveQuery } from '@/hooks';
+import { useReminderScheduler } from '@/hooks/use-reminder-scheduler';
 import { Avatar, Badge } from '@/components/ui/display';
 import { Wordmark } from '@/components/layout/wordmark';
 import { ROLE_LABELS } from '@/types/domain';
@@ -101,6 +102,9 @@ export function AppShell({
 }) {
   const { actor, permissions, signOut, providerKind } = useSession();
   const scope = useNavScope();
+  // Automatic review reminders: missed sweeps and due reminders, on an interval
+  // and whenever this device reconnects.
+  useReminderScheduler(actor?.role);
   const shellNav = nav ?? scope.nav;
   const shellTone = tone ?? scope.tone;
   const location = useLocation();

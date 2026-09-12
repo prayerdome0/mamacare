@@ -81,15 +81,17 @@ export function ImageUploader({
     [folder, onChange],
   );
 
-  const previewSrc = value?.secureUrl ?? value?.localHandle ?? value?.publicId ?? (file ? URL.createObjectURL(file) : null);
+  // A stored reference (`firebase:…`, `device:…`, a Cloudinary id) is resolved
+  // by <AppImage>; only a fresh local file needs an object URL here.
+  const previewSrc = value?.secureUrl ?? value?.localHandle ?? (file ? URL.createObjectURL(file) : null);
 
   return (
     <div>
       <div className="flex items-baseline justify-between gap-3">
         <p className="label !mb-0">{label}</p>
         {value?.storage ? (
-          <Badge tone={value.storage === 'cloudinary' ? 'green' : 'amber'}>
-            {value.storage === 'cloudinary' ? 'Cloudinary' : 'This device only'}
+          <Badge tone={value.storage === 'device' ? 'amber' : 'green'}>
+            {value.storage === 'cloudinary' ? 'Cloudinary' : value.storage === 'firebase' ? 'Firebase Storage' : 'This device only'}
           </Badge>
         ) : null}
       </div>
@@ -111,7 +113,7 @@ export function ImageUploader({
         {previewSrc ? (
           <div className="flex items-start gap-3">
             <div className="w-40 shrink-0">
-              <AppImage src={previewSrc.startsWith('blob:') || previewSrc.startsWith('data:') ? previewSrc : previewSrc} alt={`${label} preview`} ratio={ratio} />
+              <AppImage src={previewSrc ?? value?.publicId ?? null} alt={`${label} preview`} ratio={ratio} />
             </div>
             <div className="min-w-0 flex-1">
               <p className="text-[0.82rem] font-semibold text-ink-800">{file?.name ?? 'Stored image'}</p>
@@ -153,7 +155,7 @@ export function ImageUploader({
           >
             {state === 'uploading' ? <Loader2 className="size-5 animate-spin text-brand-700" aria-hidden /> : <ImageIcon className="size-5 text-ink-400" aria-hidden />}
             <span className="text-[0.86rem] font-semibold text-ink-800">Choose or drop an image</span>
-            <span className="caption max-w-sm">JPEG, PNG, WebP or HEIC up to {formatBytes(MAX_IMAGE_BYTES)}. Validated before upload; the folder and naming are set by the media service.</span>
+            <span className="caption max-w-sm">JPEG, PNG, WebP or HEIC up to {formatBytes(MAX_IMAGE_BYTES)}, validated before upload. Public imagery goes to Cloudinary; clinical files go to Firebase Storage.</span>
           </button>
         )}
         <input
@@ -175,7 +177,7 @@ export function ImageUploader({
           <summary className="cursor-pointer text-[0.76rem] font-semibold text-ink-500 hover:text-ink-800">Where will this be stored?</summary>
           {/* Long configuration keys: wrap them rather than making the page scroll. */}
           <pre className="break-anywhere mt-1.5 max-h-64 overflow-y-auto rounded-lg bg-ink-100 p-2.5 text-[0.72rem] leading-relaxed whitespace-pre-wrap text-ink-600">
-            {mediaSetupInstructions()}
+{mediaSetupInstructions()}
           </pre>
         </details>
       ) : null}
