@@ -1,7 +1,0 @@
-{
-  "projects": {
-    "default": "mamacare-33821",
-    "production": "mamacare-33821",
-    "staging": "mamacare-staging"
-  }
-}
