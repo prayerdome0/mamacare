@@ -12,6 +12,8 @@ import {
   Heart,
   LayoutDashboard,
   LogOut,
+  Megaphone,
+  MessageSquare,
   Settings,
   Shield,
   Stethoscope,
@@ -38,43 +40,59 @@ export interface NavItem {
   end?: boolean;
 }
 
+/**
+ * Health-worker workspace.
+ *
+ * Ordered the way a shift runs: today's work, the mothers in your care, the
+ * review schedule, then the clinical registers, communication and reports.
+ */
 export const APP_NAV: NavItem[] = [
   { to: '/app', label: 'Today', icon: <LayoutDashboard className="size-4" aria-hidden />, show: () => true, end: true },
-  { to: '/app/mothers', label: 'Mothers', icon: <Heart className="size-4" aria-hidden />, show: (p) => p.canViewClinicalRecords },
+  { to: '/app/mothers?assigned=me', label: 'Assigned patients', icon: <Heart className="size-4" aria-hidden />, show: (p) => p.canViewClinicalRecords },
+  { to: '/app/mothers', label: 'All patients', icon: <Users className="size-4" aria-hidden />, show: (p) => p.canViewClinicalRecords },
+  { to: '/app/appointments', label: 'Reviews', icon: <CalendarClock className="size-4" aria-hidden />, show: () => true },
   { to: '/app/anc', label: 'ANC visits', icon: <Stethoscope className="size-4" aria-hidden />, show: (p) => p.canRecordAncVisit || p.canViewClinicalRecords },
-  { to: '/app/appointments', label: 'Appointments', icon: <CalendarClock className="size-4" aria-hidden />, show: () => true },
   { to: '/app/alerts', label: 'Alerts', icon: <AlertTriangle className="size-4" aria-hidden />, show: (p) => p.canViewClinicalRecords },
   { to: '/app/referrals', label: 'Referrals', icon: <Activity className="size-4" aria-hidden />, show: (p) => p.canCreateReferral },
   { to: '/app/documents', label: 'Documents', icon: <FileText className="size-4" aria-hidden />, show: (p) => p.canUploadDocuments },
+  { to: '/app/messages', label: 'Messages', icon: <MessageSquare className="size-4" aria-hidden />, show: (p) => p.canMessageIndividuals },
+  { to: '/app/notifications', label: 'Notifications', icon: <Bell className="size-4" aria-hidden />, show: () => true },
   { to: '/app/education', label: 'Education', icon: <GraduationCap className="size-4" aria-hidden />, show: () => true },
   { to: '/app/reports', label: 'Reports', icon: <BarChart3 className="size-4" aria-hidden />, show: (p) => p.canGenerateReports },
-  { to: '/app/notifications', label: 'Notifications', icon: <Bell className="size-4" aria-hidden />, show: () => true },
   { to: '/app/profile', label: 'My profile', icon: <UserCog className="size-4" aria-hidden />, show: () => true },
 ];
 
+/**
+ * Administrator console: patients, staff, the review schedule, communication,
+ * reporting and configuration — in that order.
+ */
 export const ADMIN_NAV: NavItem[] = [
-  { to: '/admin', label: 'Overview', icon: <LayoutDashboard className="size-4" aria-hidden />, show: () => true, end: true },
-  { to: '/admin/users', label: 'Users', icon: <Users className="size-4" aria-hidden />, show: (p) => p.canManageUsers },
+  { to: '/admin', label: 'Dashboard', icon: <LayoutDashboard className="size-4" aria-hidden />, show: () => true, end: true },
+  { to: '/admin/mothers', label: 'Patients', icon: <Heart className="size-4" aria-hidden />, show: () => true },
+  { to: '/admin/users', label: 'Staff', icon: <UserCog className="size-4" aria-hidden />, show: (p) => p.canManageUsers },
   { to: '/admin/facilities', label: 'Facilities', icon: <Shield className="size-4" aria-hidden />, show: (p) => p.canManageFacilities },
-  { to: '/admin/mothers', label: 'Mothers', icon: <Heart className="size-4" aria-hidden />, show: () => true },
   { to: '/admin/appointments', label: 'Appointments', icon: <CalendarClock className="size-4" aria-hidden />, show: () => true },
   { to: '/admin/alerts', label: 'Alerts', icon: <AlertTriangle className="size-4" aria-hidden />, show: () => true },
   { to: '/admin/referrals', label: 'Referrals', icon: <Activity className="size-4" aria-hidden />, show: () => true },
   { to: '/admin/documents', label: 'Documents', icon: <FileText className="size-4" aria-hidden />, show: () => true },
-  { to: '/admin/reports', label: 'Reports', icon: <BarChart3 className="size-4" aria-hidden />, show: () => true },
+  { to: '/admin/messages', label: 'Messages', icon: <MessageSquare className="size-4" aria-hidden />, show: (p) => p.canMessageIndividuals },
   { to: '/admin/notifications', label: 'Notifications', icon: <Bell className="size-4" aria-hidden />, show: () => true },
+  { to: '/admin/announcements', label: 'Announcements', icon: <Megaphone className="size-4" aria-hidden />, show: (p) => p.canAnnounce },
+  { to: '/admin/reports', label: 'Reports', icon: <BarChart3 className="size-4" aria-hidden />, show: (p) => p.canGenerateReports },
+  { to: '/admin/services', label: 'Services', icon: <Stethoscope className="size-4" aria-hidden />, show: (p) => p.canManageServices },
   { to: '/admin/education', label: 'Education', icon: <GraduationCap className="size-4" aria-hidden />, show: (p) => p.canManageEducation },
   { to: '/admin/audit', label: 'Audit logs', icon: <ClipboardList className="size-4" aria-hidden />, show: (p) => p.canViewAuditLogs },
   { to: '/admin/settings', label: 'Settings', icon: <Settings className="size-4" aria-hidden />, show: (p) => p.canManageSettings },
 ];
 
 export const MOTHER_NAV: NavItem[] = [
-  { to: '/home', label: 'My pregnancy', icon: <Heart className="size-4" aria-hidden />, show: () => true, end: true },
+  { to: '/home', label: 'My dashboard', icon: <LayoutDashboard className="size-4" aria-hidden />, show: () => true, end: true },
+  { to: '/home/records', label: 'My pregnancy', icon: <Heart className="size-4" aria-hidden />, show: () => true },
   { to: '/home/appointments', label: 'Appointments', icon: <CalendarClock className="size-4" aria-hidden />, show: () => true },
-  { to: '/home/records', label: 'My records', icon: <FileText className="size-4" aria-hidden />, show: () => true },
+  { to: '/home/messages', label: 'Messages', icon: <MessageSquare className="size-4" aria-hidden />, show: () => true },
+  { to: '/home/notifications', label: 'Notifications', icon: <Bell className="size-4" aria-hidden />, show: () => true },
   { to: '/home/education', label: 'Reading', icon: <GraduationCap className="size-4" aria-hidden />, show: () => true },
-  { to: '/home/notifications', label: 'Alerts', icon: <Bell className="size-4" aria-hidden />, show: () => true },
-  { to: '/home/profile', label: 'My account', icon: <UserCog className="size-4" aria-hidden />, show: () => true },
+  { to: '/home/profile', label: 'My profile', icon: <UserCog className="size-4" aria-hidden />, show: () => true },
 ];
 
 export const PUBLIC_NAV = [

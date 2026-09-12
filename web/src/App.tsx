@@ -33,6 +33,7 @@ const DocumentsPage = lazy(() => import('@/routes/app/documents'));
 const ReportsPage = lazy(() => import('@/routes/app/reports'));
 const EducationPage = lazy(() => import('@/routes/app/education'));
 const NotificationsPage = lazy(() => import('@/routes/app/notifications'));
+const MessagesPage = lazy(() => import('@/routes/app/messages'));
 const ProfilePage = lazy(() => import('@/routes/app/profile'));
 
 const AdminDashboard = lazy(() => import('@/routes/admin/dashboard'));
@@ -41,6 +42,8 @@ const AdminUserDetail = lazy(() => import('@/routes/admin/user-detail'));
 const AdminFacilities = lazy(() => import('@/routes/admin/facilities'));
 const AdminSettings = lazy(() => import('@/routes/admin/settings'));
 const AdminAudit = lazy(() => import('@/routes/admin/audit'));
+const AdminAnnouncements = lazy(() => import('@/routes/admin/announcements'));
+const AdminServices = lazy(() => import('@/routes/admin/services'));
 
 const MotherHome = lazy(() => import('@/routes/mother/home'));
 const MotherAppointments = lazy(() => import('@/routes/mother/appointments'));
@@ -112,6 +115,7 @@ export function App() {
                         <Route path="appointments" element={<MotherAppointments />} />
                         <Route path="records" element={<MotherRecords />} />
                         <Route path="education" element={<MotherEducation />} />
+                        <Route path="messages" element={<MessagesPage />} />
                         <Route path="notifications" element={<MotherNotifications />} />
                         <Route path="profile" element={<MotherProfile />} />
                         <Route path="*" element={<Navigate to="/home" replace />} />
@@ -138,6 +142,7 @@ export function App() {
                         <Route path="documents" element={<DocumentsPage />} />
                         <Route path="reports" element={<ReportsPage />} />
                         <Route path="education" element={<EducationPage />} />
+                        <Route path="messages" element={<MessagesPage />} />
                         <Route path="notifications" element={<NotificationsPage />} />
                         <Route path="profile" element={<ProfilePage />} />
                         <Route path="*" element={<Navigate to="/app" replace />} />
@@ -168,7 +173,10 @@ export function App() {
                         <Route path="documents" element={<DocumentsPage />} />
                         <Route path="reports" element={<ReportsPage />} />
                         <Route path="education" element={<EducationPage />} />
+                        <Route path="messages" element={<MessagesPage />} />
                         <Route path="notifications" element={<NotificationsPage />} />
+                        <Route path="announcements" element={<AdminAnnouncements />} />
+                        <Route path="services" element={<AdminServices />} />
                         <Route path="*" element={<Navigate to="/admin" replace />} />
                       </Routes>
                     </NavScope>

@@ -2,9 +2,12 @@ import type {
   AccountStatus,
   AlertRule,
   AncVisit,
+  Announcement,
   AppNotification,
   Appointment,
   AuditLogEntry,
+  Message,
+  ServiceOffering,
   AuthClaims,
   ClinicalAlert,
   DeviceToken,
@@ -48,6 +51,9 @@ export interface Collections {
   audit_logs: AuditLogEntry;
   education: EducationResource;
   alert_rules: AlertRule;
+  messages: Message;
+  announcements: Announcement;
+  services: ServiceOffering;
   devices: DeviceToken;
   facility_assignments: FacilityAssignment;
   settings: SystemSettings;
