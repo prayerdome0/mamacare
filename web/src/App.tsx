@@ -9,6 +9,12 @@ import { AppProviders } from '@/providers/app-providers';
    ship their own chunk so a first visit to the landing page never downloads the
    clinical screens. */
 const Landing = lazy(() => import('@/routes/public/landing'));
+const About = lazy(() => import('@/routes/public/about'));
+const Services = lazy(() => import('@/routes/public/services'));
+const HowItWorks = lazy(() => import('@/routes/public/how-it-works'));
+const ForClinics = lazy(() => import('@/routes/public/for-clinics'));
+const ForMothers = lazy(() => import('@/routes/public/for-mothers'));
+const Resources = lazy(() => import('@/routes/public/resources'));
 const MaternalHealth = lazy(() => import('@/routes/public/maternal-health'));
 const Emergency = lazy(() => import('@/routes/public/emergency'));
 const Contact = lazy(() => import('@/routes/public/contact'));
@@ -61,6 +67,12 @@ export function App() {
             <Routes>
               {/* Public site — this is the first screen, never a login wall. */}
               <Route path="/" element={<Landing />} />
+              <Route path="/about" element={<About />} />
+              <Route path="/services" element={<Services />} />
+              <Route path="/how-it-works" element={<HowItWorks />} />
+              <Route path="/for-clinics" element={<ForClinics />} />
+              <Route path="/for-mothers" element={<ForMothers />} />
+              <Route path="/resources" element={<Resources />} />
               <Route path="/maternal-health" element={<MaternalHealth />} />
               <Route path="/emergency" element={<Emergency />} />
               <Route path="/faq" element={<Faq />} />

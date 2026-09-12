@@ -2,6 +2,7 @@ import { useMemo, type ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
   ArrowRight,
+  Baby,
   BadgeCheck,
   BarChart3,
   Bell,
@@ -28,6 +29,7 @@ import {
   UserCog,
   UserPlus,
   Users,
+  Workflow,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useSession } from '@/providers/app-providers';
@@ -84,10 +86,14 @@ export function useMainMenuSections(): MainMenuSection[] {
       title: 'Explore',
       items: [
         { to: '/', label: 'Home', detail: 'What MAMA CARE is and who it is for', icon: icon(<Home className="size-4" aria-hidden />) },
-        { to: '/#about', label: 'About the platform', detail: 'How a pregnancy record is kept, and by whom', icon: icon(<Info className="size-4" aria-hidden />) },
-        { to: '/#services', label: 'Services', detail: 'Antenatal care, alerts, referrals, reminders', icon: icon(<Stethoscope className="size-4" aria-hidden />) },
+        { to: '/about', label: 'About the platform', detail: 'How a pregnancy record is kept, and by whom', icon: icon(<Info className="size-4" aria-hidden />) },
+        { to: '/services', label: 'Services', detail: 'What the platform does, and what your facility offers', icon: icon(<Stethoscope className="size-4" aria-hidden />) },
+        { to: '/how-it-works', label: 'How it works', detail: 'From registration to postnatal, on one record', icon: icon(<Workflow className="size-4" aria-hidden />) },
         { to: '/maternal-health', label: 'Maternal health guidance', detail: 'Danger signs, contacts and care milestones', icon: icon(<Heart className="size-4" aria-hidden />) },
         { to: '/emergency', label: 'Emergency guidance', detail: 'What to do, and who to call, right now', icon: icon(<LifeBuoy className="size-4" aria-hidden />) },
+        { to: '/for-clinics', label: 'For clinics', detail: 'How a facility adopts it, and who signs off', icon: icon(<Building2 className="size-4" aria-hidden />) },
+        { to: '/for-mothers', label: 'For mothers', detail: 'What you see on your own account', icon: icon(<Baby className="size-4" aria-hidden />) },
+        { to: '/resources', label: 'Resources & reading', detail: 'Published guidance and the education library', icon: icon(<BookOpen className="size-4" aria-hidden />) },
       ],
     };
 

@@ -205,3 +205,230 @@ export const STATS = [
   { value: '9', label: 'referral statuses tracked to closure' },
   { value: '0', label: 'clinical conclusions drawn by the software' },
 ] as const;
+
+/**
+ * The pregnancy lifecycle as the platform follows it.
+ *
+ * Each stage names what is *recorded* at that point, not what the software
+ * concludes. Used by the "How it works" page; the stage key doubles as the
+ * anchor id so a link can point straight at one stage.
+ */
+export const CARE_LIFECYCLE = [
+  {
+    key: 'registration',
+    stage: 'Registration',
+    weeks: 'First contact, any gestation',
+    title: 'She is registered once, and the record is dated',
+    body:
+      'A unique patient ID is issued from a server-side counter, so two devices can never mint the same one. The pregnancy is dated from the last menstrual period or an ultrasound, and the estimated due date and gestational age are then recalculated at every visit rather than copied forward. Consent is captured with its version, so a later change of policy can be answered from the record.',
+    recorded: ['Patient ID and identity details', 'Pregnancy dating and estimated due date', 'Obstetric history and parity', 'Consent, with the version accepted'],
+  },
+  {
+    key: 'booking',
+    stage: 'Booking visit',
+    weeks: 'As early as possible in the first trimester',
+    title: 'A baseline the rest of the pregnancy is compared against',
+    body:
+      'The booking visit carries the full observation set — blood pressure, pulse, temperature, respirations, weight, MUAC, fundal height, fetal heart where audible, urine findings and haemoglobin — plus the danger-sign screen. Everything recorded later is a trend away from this baseline, which is why the baseline is captured completely rather than partially.',
+    recorded: ['Complete observation set', 'Thirteen-sign danger screen', 'Haemoglobin and urine result', 'Iron and folic acid started and recorded'],
+  },
+  {
+    key: 'followup',
+    stage: 'Follow-up contacts',
+    weeks: 'To at least eight contacts',
+    title: 'The same form every time, so the visits can be compared',
+    body:
+      'Each contact is recorded in a fixed format. The rules run at the moment of saving: a value that crosses a configured threshold raises an alert immediately, with the reading and the threshold shown side by side. Weight, fundal height, blood pressure and haemoglobin are drawn as charts across the pregnancy, so a trajectory is visible rather than inferred from memory.',
+    recorded: ['Observations in the same format', 'Rules evaluated on save', 'Trend charts across visits', 'Counselling given and the plan agreed'],
+  },
+  {
+    key: 'alert',
+    stage: 'Alert raised',
+    weeks: 'Whenever a threshold is crossed',
+    title: 'An alert routes the assessment; it never names a diagnosis',
+    body:
+      'An alert states which recorded value crossed which configured threshold and what assessment is required — assess now, review within a set interval, or monitor. One alert per rule per visit, so a single reading cannot produce three queue entries. Whoever responds records what was done and when; the trail is part of the record, not a note in a margin.',
+    recorded: ['Red / amber severity with text labels', 'The triggering value and the threshold', 'Acknowledgement and response trail', 'Escalation to the referral queue where required'],
+  },
+  {
+    key: 'referral',
+    stage: 'Referral',
+    weeks: 'When higher-level care is needed',
+    title: 'A packet that arrives complete, and a loop that closes',
+    body:
+      'The referral carries the clinical question, urgency, vital signs at transfer, transport arrangements and the record summary. The receiving facility records arrival, assessment and outcome against the same record, and an awaiting-closure queue means an unanswered referral is visible to the referring desk rather than lost between two sites.',
+    recorded: ['Clinical question and urgency', 'Vital-sign snapshot at transfer', 'Transport and companion arrangements', 'Receiving facility assessment and outcome'],
+  },
+  {
+    key: 'postnatal',
+    stage: 'Delivery and postnatal',
+    weeks: 'Birth, then day one, day seven, six weeks',
+    title: 'The record continues past delivery',
+    body:
+      'The first week carries the highest risk of bleeding, infection and complications from hypertension, so antenatal findings continue into postnatal visits rather than restarting from zero. Newborn weight and the six-week check are recorded against the same record, and family planning is offered and documented before the record closes.',
+    recorded: ['Mode and outcome of delivery', 'Postnatal checks for mother and baby', 'Newborn weight and feeding notes', 'Family planning offered'],
+  },
+] as const;
+
+/**
+ * Where data actually lives. Written to match the implementation — the
+ * /how-it-works page renders this verbatim, so it must not promise anything the
+ * code does not do.
+ */
+export const DATA_FLOW = [
+  {
+    key: 'entry',
+    title: 'Entered on the clinic device',
+    body: 'A visit is entered against the mother’s record. Validation runs before the save, and a save is idempotent — replaying the same submission cannot create a second record.',
+  },
+  {
+    key: 'storage',
+    title: 'Stored as rows in the project database',
+    body: 'Records are stored as documents in Cloud Firestore, one collection per record type. Every read and write is checked by security rules against the authenticated token, not only by what the interface shows.',
+  },
+  {
+    key: 'media',
+    title: 'Files stored separately from the record',
+    body: 'Photographs and documents go to Cloudinary; reports and clinical documents are uploaded non-public and opened through short-lived signed URLs. The database holds only the metadata.',
+  },
+  {
+    key: 'delivery',
+    title: 'Delivered to the people who need it',
+    body: 'Reminders go out as push notifications and, where an approved SMS provider is configured, as SMS. Referral packets reach the receiving facility through the record itself.',
+  },
+  {
+    key: 'audit',
+    title: 'Recorded in an append-only log',
+    body: 'Every privileged action — a role change, a threshold edit, a report generated — is written to an audit log with who, what and when. Entries cannot be edited or removed.',
+  },
+] as const;
+
+/**
+ * Adoption path for a facility. Rendered on /for-clinics. Each step names the
+ * screen an administrator actually uses, so the page stays honest about what
+ * has to be done before real patient care.
+ */
+export const FOR_CLINICS = {
+  intro:
+    'MAMA CARE is deployed per facility or per health authority. The platform arrives with a starting clinical configuration that is explicitly not approved guidance: the thresholds, alert wording and escalation steps are reviewed and signed off by your clinical authority before the system holds real records, and the settings screen records who reviewed them and when.',
+  steps: [
+    {
+      step: '01',
+      title: 'Create the facility record',
+      body: 'An administrator creates each facility — type, district and province, contact details, whether it has a maternity ward, ultrasound and laboratory, and which higher-level facility it refers up to. The directory is what referrals and staff assignment are built on.',
+      screen: 'Admin → Facilities',
+    },
+    {
+      step: '02',
+      title: 'Approve staff and assign them',
+      body: 'Health workers register and land in a pending queue. An administrator approves each account, sets the role and assigns the facility. Self-registration can never request administrator, and every role change is written to the audit log.',
+      screen: 'Admin → Staff',
+    },
+    {
+      step: '03',
+      title: 'Review and sign off the clinical rules',
+      body: 'Alert thresholds ship as a starting configuration. The clinical authority reviews each rule — the value, the threshold, the severity and the wording — and signs it off. Until that is done the rules are marked as awaiting review.',
+      screen: 'Admin → Platform settings',
+    },
+    {
+      step: '04',
+      title: 'Publish the services the facility offers',
+      body: 'The services catalogue lists what the facility actually provides: antenatal care, delivery, postnatal, newborn care, laboratory, outreach. It is read by the public services page and by appointment booking, so nothing about what the clinic offers is hard-coded.',
+      screen: 'Admin → Services',
+    },
+    {
+      step: '05',
+      title: 'Configure reminders and integrations',
+      body: 'Reminder lead times, whether SMS is enabled and which push project is in use are configured per deployment. Where no SMS provider is approved, push notifications alone are used rather than sending through an unvetted route.',
+      screen: 'Admin → Platform settings',
+    },
+    {
+      step: '06',
+      title: 'Train the team, then open the register',
+      body: 'The education library holds the reading offered to mothers and the training material for staff, authored in the facility’s own languages. Once the team has run a full cycle in training, mothers are registered for real.',
+      screen: 'Workspace → Education',
+    },
+  ],
+  responsibilities: [
+    { title: 'Clinical authority', detail: 'Reviews and signs off the rule set, thresholds and escalation wording. Named on the record.' },
+    { title: 'Administrator', detail: 'Approves accounts, maintains the facility directory, publishes services, reviews the audit log.' },
+    { title: 'Facility supervisor', detail: 'Manages staff assignment, monitors the alert and lost-to-follow-up queues, signs off reports.' },
+    { title: 'Clinical team', detail: 'Records visits and referrals, responds to alerts within the interval the rule specifies.' },
+  ],
+  evaluation:
+    'A facility can run the whole workflow before connecting a cloud project: with no Firebase configuration present, the build stores records in the browser using the same permission model and the same rules engine. Nothing leaves the device in that mode, and the service status page says so plainly.',
+} as const;
+
+/**
+ * What a mother with a patient account can actually do. Rendered on
+ * /for-mothers; every line corresponds to a screen in the mother portal.
+ */
+export const FOR_MOTHERS = {
+  intro:
+    'A mother with an account sees her own record and nothing else — her dates, her next appointment, her results and her reports. She cannot see another patient’s record, and no aggregate view on the site ever shows a name.',
+  features: [
+    { title: 'Your pregnancy at a glance', detail: 'How many weeks pregnant you are, your estimated due date, and which visit you are on — recalculated from your dating at every contact.' },
+    { title: 'Appointments and reminders', detail: 'Your next appointment, and a reminder before it. If you cannot attend, your facility sees that the visit was missed and follows up.' },
+    { title: 'Your visit records', detail: 'What was measured at each antenatal contact: blood pressure, weight, fundal height, test results, the medicines you were given and the plan agreed.' },
+    { title: 'Your reports and documents', detail: 'Reports released to you by your facility, and the documents on your record. They open through a short-lived link, not a public one.' },
+    { title: 'Reading for your stage', detail: 'Health education chosen for the stage of pregnancy you are in, in your chosen language.' },
+    { title: 'Messages from your clinic', detail: 'Announcements from the facility and messages from the team caring for you, in one place.' },
+  ],
+  boundaries: [
+    'Your record belongs to the facility that holds it. Corrections and deletions are requested from that facility, not from this site.',
+    'MAMA CARE does not diagnose. If an alert appears on your record it means a clinician needs to assess a recorded finding.',
+    'In an emergency, do not use the portal. Go to the nearest facility and call the numbers on the emergency page.',
+  ],
+} as const;
+
+/**
+ * Published external references and printable material.
+ *
+ * These are real, stable publications — the resources page links out to them
+ * rather than restating clinical guidance in the platform's own words, so the
+ * authority for each statement stays with its publisher.
+ */
+export const PUBLIC_RESOURCES = [
+  {
+    key: 'who-anc',
+    title: 'WHO recommendations on antenatal care for a positive pregnancy experience',
+    publisher: 'World Health Organization',
+    detail: 'The eight-contact model, the recommended tests and supplements at each contact, and the evidence behind them.',
+    href: 'https://www.who.int/health-topics/antenatal-care',
+  },
+  {
+    key: 'who-maternal-mortality',
+    title: 'Maternal mortality — fact sheet',
+    publisher: 'World Health Organization',
+    detail: 'Current global and regional figures, the leading causes of maternal death, and which of them are preventable.',
+    href: 'https://www.who.int/news-room/fact-sheets/detail/maternal-mortality',
+  },
+  {
+    key: 'who-preeclampsia',
+    title: 'WHO recommendation on the prevention and treatment of pre-eclampsia and eclampsia',
+    publisher: 'World Health Organization',
+    detail: 'Blood-pressure thresholds, the role of calcium and magnesium sulphate, and when referral is indicated.',
+    href: 'https://www.who.int/publications/i/item/9789241549226',
+  },
+  {
+    key: 'unfpa-zambia',
+    title: 'UNFPA Zambia — sexual and reproductive health',
+    publisher: 'United Nations Population Fund',
+    detail: 'National context for maternal health in Zambia, including programmes operating with the Ministry of Health.',
+    href: 'https://zambia.unfpa.org',
+  },
+  {
+    key: 'moh-zambia',
+    title: 'Ministry of Health, Republic of Zambia',
+    publisher: 'Government of Zambia',
+    detail: 'National health policy, facility directory information and public health notices.',
+    href: 'https://www.moh.gov.zm',
+  },
+  {
+    key: 'unicef-newborn',
+    title: 'Newborn health and early child development',
+    publisher: 'UNICEF',
+    detail: 'Postnatal care for the newborn, essential newborn care practices and follow-up in the first weeks.',
+    href: 'https://www.unicef.org/health/newborn-health',
+  },
+] as const;

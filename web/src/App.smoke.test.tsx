@@ -140,9 +140,14 @@ describe('the application boots and opens on the public site', () => {
     // only once there is an account to show them for.
     for (const label of [
       'Home',
+      'About the platform',
       'Services',
+      'How it works',
       'Maternal health guidance',
       'Emergency guidance',
+      'For clinics',
+      'For mothers',
+      'Resources & reading',
       'Sign in',
       'Create an account',
       'Questions & answers',
@@ -218,14 +223,105 @@ describe('the application boots and opens on the public site', () => {
   });
 
   it('shows the public supporting pages without a crash', async () => {
-    for (const path of ['/maternal-health', '/emergency', '/faq', '/privacy', '/contact']) {
+    for (const path of [
+      '/maternal-health',
+      '/emergency',
+      '/faq',
+      '/privacy',
+      '/contact',
+      '/about',
+      '/services',
+      '/how-it-works',
+      '/for-clinics',
+      '/for-mothers',
+      '/resources',
+    ]) {
       await act(async () => {
         root.unmount();
       });
       container.remove();
       mount();
       await renderAt(path);
-      expect(text(), `page ${path}`).not.toMatch(/unexpected error/i);
+      const shown = text();
+      expect(shown, `page ${path}`).not.toMatch(/unexpected error/i);
+      // A route that resolved but rendered nothing would also pass the check
+      // above, so require real content from each page.
+      expect(shown.length, `page ${path} must render content`).toBeGreaterThan(400);
+    }
+  });
+
+  /**
+   * The six informational pages must each render their own subject and the
+   * public header, and must be reachable from the header navigation rather than
+   * only by typing an address.
+   */
+  it('renders each informational page with its own subject and the public header', async () => {
+    const expectations: Array<[string, RegExp]> = [
+      ['/about', /A pregnancy record that survives the next visit/i],
+      ['/services', /What the platform does, and what your facility offers/i],
+      ['/how-it-works', /One record, from registration to the six-week check/i],
+      ['/for-clinics', /Adopting MAMA CARE at a facility/i],
+      ['/for-mothers', /Your own record, on your own phone/i],
+      ['/resources', /Reading for each stage, and the guidance behind it/i],
+    ];
+
+    for (const [path, subject] of expectations) {
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+      mount();
+      await renderAt(path);
+
+      const shown = text();
+      expect(shown, `${path} must state its subject`).toMatch(subject);
+      // Every page opens with the breadcrumb trail and carries the site chrome.
+      expect(shown, `${path} must carry the public header`).toMatch(/MAMA CARE/i);
+      expect(container.querySelector('a[href="/"]'), `${path} must link back home`).not.toBeNull();
+      expect(container.querySelector('footer'), `${path} must render the footer`).not.toBeNull();
+    }
+  });
+
+  it('lists the informational pages in the header navigation', async () => {
+    await renderAt('/');
+    const nav = container.querySelector('nav[aria-label="Primary"]');
+    expect(nav, 'the public header must render a primary nav').not.toBeNull();
+
+    const hrefs = [...(nav?.querySelectorAll('a') ?? [])].map((anchor) => anchor.getAttribute('href'));
+    for (const expected of ['/about', '/services', '/how-it-works', '/maternal-health', '/emergency', '/contact']) {
+      expect(hrefs, `header nav should link to ${expected}`).toContain(expected);
+    }
+    // The footer offers the audience pages and the resources library.
+    for (const expected of ['/for-clinics', '/for-mothers', '/resources', '/privacy', '/faq', '/status']) {
+      expect(
+        [...container.querySelectorAll('footer a')].map((anchor) => anchor.getAttribute('href')),
+        `footer should link to ${expected}`,
+      ).toContain(expected);
+    }
+  });
+
+  /**
+   * The services page reads the facility services catalogue and the clinics page
+   * reads the facility directory — both through the real data layer. A
+   * signed-out visitor on a deployment with nothing published must still get a
+   * readable page, not an error screen or a crash.
+   */
+  it('degrades to a readable state when a deployment publishes no catalogue or directory', async () => {
+    for (const path of ['/services', '/for-clinics', '/resources']) {
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+      mount();
+      await renderAt(path);
+
+      const shown = text();
+      expect(shown, `${path} must not show the interface error page`).not.toMatch(
+        /500 — unexpected error|Something broke while loading/i,
+      );
+      expect(shown, `${path} must explain the state instead of failing`).toMatch(
+        /No services published|No facilities published|Nothing published|opens with an account|could not be read/i,
+      );
     }
   });
 });

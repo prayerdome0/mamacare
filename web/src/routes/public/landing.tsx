@@ -58,7 +58,7 @@ export default function LandingPage() {
                   Open your workspace
                 </ButtonLink>
               ) : (
-                <ButtonLink to="/#services" size="lg" icon={<ArrowRight className="size-4" aria-hidden />}>
+                <ButtonLink to="/services" size="lg" icon={<ArrowRight className="size-4" aria-hidden />}>
                   See what the platform does
                 </ButtonLink>
               )}
@@ -141,6 +141,11 @@ export default function LandingPage() {
         eyebrow="About MAMA CARE"
         title="A pregnancy record that survives the next visit"
         description={ABOUT.approach}
+        actions={
+          <ButtonLink to="/about" variant="secondary" size="sm">
+            More about the platform
+          </ButtonLink>
+        }
       >
         <div className="grid gap-8 lg:grid-cols-[0.95fr_1.05fr]">
           <div className="space-y-4">
@@ -182,9 +187,14 @@ export default function LandingPage() {
         title="What the platform does at each step of care"
         description="Six capabilities that replace the paper card, the referral slip and the appointment book — on one record, with permissions enforced where the data lives."
         actions={
-          <ButtonLink to="/register" variant="secondary" size="sm">
-            Set up your facility
-          </ButtonLink>
+          <>
+            <ButtonLink to="/services" variant="secondary" size="sm">
+              All services
+            </ButtonLink>
+            <ButtonLink to="/register" variant="secondary" size="sm">
+              Set up your facility
+            </ButtonLink>
+          </>
         }
       >
         <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
@@ -209,7 +219,16 @@ export default function LandingPage() {
       </PublicSection>
 
       {/* ── Workflow ─────────────────────────────────────────────────── */}
-      <PublicSection tone="ink" eyebrow="How a visit runs" title="Booking to follow-up, in one continuous record">
+      <PublicSection
+        tone="ink"
+        eyebrow="How a visit runs"
+        title="Booking to follow-up, in one continuous record"
+        actions={
+          <ButtonLink to="/how-it-works" variant="white" size="sm">
+            The full lifecycle
+          </ButtonLink>
+        }
+      >
         <div className="grid gap-4 lg:grid-cols-4">
           {[
             { icon: <Users className="size-4" aria-hidden />, step: '01', title: 'Register', body: 'Unique patient ID, consent, dating, contact and community health worker. Gestational age and due date are calculated, never typed as the key.', image: 'communityWorker' as const },
@@ -348,7 +367,21 @@ export default function LandingPage() {
       </section>
 
       {/* ── Roles ────────────────────────────────────────────────────── */}
-      <PublicSection tone="tint" eyebrow="Who uses it" title="One record, six sets of permissions">
+      <PublicSection
+        tone="tint"
+        eyebrow="Who uses it"
+        title="One record, six sets of permissions"
+        actions={
+          <>
+            <ButtonLink to="/for-clinics" variant="secondary" size="sm">
+              For clinics
+            </ButtonLink>
+            <ButtonLink to="/for-mothers" variant="secondary" size="sm">
+              For mothers
+            </ButtonLink>
+          </>
+        }
+      >
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           <RoleCard
             title="Administrator"
