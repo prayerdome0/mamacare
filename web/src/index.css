@@ -64,6 +64,11 @@
   html {
     scroll-behavior: smooth;
     -webkit-text-size-adjust: 100%;
+    /* Last-resort guard against sideways page scroll. `clip` (rather than
+       `hidden`) does not create a scroll container, so sticky headers keep
+       working. Every known cause is fixed at the source as well; this only stops
+       one stray element from making the whole page draggable sideways. */
+    overflow-x: clip;
   }
 
   body {
@@ -94,6 +99,32 @@
 
   p {
     text-wrap: pretty;
+  }
+
+  /* Long unbroken strings — email addresses, patient ids, file names, URLs —
+     are what push cards and tables wider than a phone. */
+  body {
+    overflow-wrap: break-word;
+  }
+
+  /* Media never exceeds its container on any screen size. */
+  img,
+  video,
+  canvas {
+    max-width: 100%;
+  }
+
+  /* Flex and grid children default to `min-width: auto`, which refuses to shrink
+     below their content and is the usual reason a dashboard overflows on a
+     laptop. Layout containers may always shrink. */
+  main,
+  .shell,
+  .card,
+  nav,
+  section,
+  article,
+  aside {
+    min-width: 0;
   }
 
 }
@@ -328,6 +359,13 @@
   /* ── Tables ────────────────────────────────────────────────────── */
   .table-scroll {
     @apply overflow-x-auto;
+    /* Tables scroll inside their own card instead of widening the page. */
+    max-width: 100%;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+  .table-base {
+    max-width: 100%;
   }
   .table-th {
     @apply sticky top-0 z-[1] border-b border-ink-200 bg-ink-50/95 px-3 py-2.5 text-[0.7rem]
@@ -424,6 +462,17 @@
   }
   .safe-bottom {
     padding-bottom: max(1rem, env(safe-area-inset-bottom));
+  }
+  /* Opt-in for a value that must break mid-word rather than overflow. */
+  .break-anywhere {
+    overflow-wrap: anywhere;
+  }
+  /* Keeps a row of buttons inside the viewport on a narrow phone. */
+  .actions-wrap {
+    @apply flex flex-wrap items-center gap-2;
+  }
+  .actions-wrap > * {
+    max-width: 100%;
   }
 }
 

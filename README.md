@@ -52,7 +52,27 @@ npm run dev                     # detects the keys and uses Firestore + Firebase
 
 No code change, no new screen: `src/config/env.ts` picks the provider, and
 `services/data/firestore-provider.ts` replaces `services/data/local/provider.ts`.
-Then deploy the rules: `firebase deploy --only firestore`.
+Then deploy the rules: `firebase deploy --only firestore:rules,firestore:indexes`.
+
+> The rules are the enforcement layer, and a rules file that does not compile is not
+> deployed at all — the project silently keeps its previous rules. The rules language has
+> no loop construct, so this file expresses "did this patch touch a privileged field?"
+> with `Map.diff().affectedKeys().hasAny([…])`. `npm test` in `web/` checks the file for
+> constructs the compiler rejects, because there is no emulator in CI.
+
+### Deploying the site
+
+`web/` is a single-page application: every route must be served `index.html`, and the
+build output must actually reach the host. Two supported paths:
+
+* **Vercel** — `vercel.json` is committed (root, and again inside `web/` for a project
+  whose Root Directory is that folder), so no dashboard build settings are needed.
+* **Firebase Hosting** — `firebase.json` serves `web/dist` and rewrites `/api/**` to the
+  Cloud Run service.
+
+Both are described, with the environment variables each host needs, in
+[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — including what a Vercel `404: NOT_FOUND`,
+a blank page, or *"the database refused the profile write"* actually mean.
 
 ### The API service (optional but needed for privileged work)
 
@@ -189,4 +209,5 @@ complete and the interface names the variable that is missing.
 
 * [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — layers, data flow, provider contract, why the device provider exists.
 * [`docs/SETUP-CREDENTIALS.md`](docs/SETUP-CREDENTIALS.md) — Firebase, Cloudinary, SMS, push, first administrator, deploy.
+* [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — hosting configuration, environment variables, the role model in Firestore, and troubleshooting (404 at the edge, the interface's 500 page, refused profile writes).
 * [`docs/SECURITY-VALIDATION.md`](docs/SECURITY-VALIDATION.md) — access matrix tests, clinical rule validation checklist, go-live gate.

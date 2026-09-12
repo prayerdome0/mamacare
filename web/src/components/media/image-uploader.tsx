@@ -173,7 +173,10 @@ export function ImageUploader({
       {state === 'idle' && !value ? (
         <details className="mt-2">
           <summary className="cursor-pointer text-[0.76rem] font-semibold text-ink-500 hover:text-ink-800">Where will this be stored?</summary>
-          <pre className="mt-1.5 overflow-x-auto whitespace-pre-wrap rounded-lg bg-ink-100 p-2.5 text-[0.72rem] leading-relaxed text-ink-600">{mediaSetupInstructions()}</pre>
+          {/* Long configuration keys: wrap them rather than making the page scroll. */}
+          <pre className="break-anywhere mt-1.5 max-h-64 overflow-y-auto rounded-lg bg-ink-100 p-2.5 text-[0.72rem] leading-relaxed whitespace-pre-wrap text-ink-600">
+            {mediaSetupInstructions()}
+          </pre>
         </details>
       ) : null}
     </div>

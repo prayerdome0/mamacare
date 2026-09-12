@@ -569,7 +569,9 @@ function GrowthPanel({ visits }: { visits: AncVisit[] }) {
         </div>
       </Card>
       <Card title="All measurements" bodyClassName="p-0">
-        <div className="max-h-80 overflow-auto">
+        {/* Seven clinical columns do not fit a phone: the table scrolls inside
+            its own card, with the page itself never moving sideways. */}
+        <div className="table-scroll max-h-80 overflow-y-auto">
           <table className="table-base">
             <thead>
               <tr>

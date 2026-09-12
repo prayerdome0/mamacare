@@ -83,6 +83,19 @@ function createMemoryDb(): IDBDatabase {
   return null as unknown as IDBDatabase;
 }
 
+/**
+ * Waits until the storage backend has been decided.
+ *
+ * IndexedDB can be missing entirely (private windows, some in-app browsers). The
+ * probe sets `useMemory`, but a write issued before the probe settled used to
+ * fail with "no db". Every operation now awaits this first, so the first write of
+ * a session is already routed to the in-memory store when that is what the
+ * browser can offer.
+ */
+async function ready(): Promise<void> {
+  await openDb().catch(() => null);
+}
+
 export const isPersistent = (): boolean => !useMemory;
 export const storageMode = (): 'indexeddb' | 'session-memory' => (useMemory ? 'session-memory' : 'indexeddb');
 
@@ -122,6 +135,7 @@ function notify(store: StoreName): void {
 }
 
 export async function put<T extends object>(store: StoreName, value: T): Promise<T> {
+  await ready();
   if (useMemory) {
     const record = value as { id?: string; key?: string };
     const key = (record.key ?? record.id) as string;
@@ -136,6 +150,7 @@ export async function put<T extends object>(store: StoreName, value: T): Promise
 
 export async function bulkPut<T extends object>(store: StoreName, values: T[]): Promise<void> {
   if (values.length === 0) return;
+  await ready();
   if (useMemory) {
     for (const value of values) {
       const record = value as { id?: string; key?: string };
@@ -158,6 +173,7 @@ export async function bulkPut<T extends object>(store: StoreName, values: T[]): 
 }
 
 export async function get<T>(store: StoreName, id: string): Promise<T | null> {
+  await ready();
   if (useMemory) return (mem(store).get(id) as T) ?? null;
   try {
     const value = await tx<T | undefined>(store, 'readonly', (objectStore) => objectStore.get(id));
@@ -168,6 +184,7 @@ export async function get<T>(store: StoreName, id: string): Promise<T | null> {
 }
 
 export async function all<T>(store: StoreName): Promise<T[]> {
+  await ready();
   if (useMemory) return Array.from(mem(store).values()) as T[];
   try {
     return (await tx<T[]>(store, 'readonly', (objectStore) => objectStore.getAll())) ?? [];
@@ -177,6 +194,7 @@ export async function all<T>(store: StoreName): Promise<T[]> {
 }
 
 export async function remove(store: StoreName, id: string): Promise<void> {
+  await ready();
   if (useMemory) {
     mem(store).delete(id);
     notify(store);
@@ -187,6 +205,7 @@ export async function remove(store: StoreName, id: string): Promise<void> {
 }
 
 export async function clear(store: StoreName): Promise<void> {
+  await ready();
   if (useMemory) {
     mem(store).clear();
     notify(store);

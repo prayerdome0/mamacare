@@ -8,7 +8,7 @@
  */
 
 import { dataProvider, integrations, logRuntimeSummary } from '@/config/env';
-import { AppError } from '@/lib/errors';
+import { AppError, logProviderError } from '@/lib/errors';
 import { api } from '@/services/api/client';
 import { LocalDataProvider } from '@/services/data/local/provider';
 import { FirestoreProvider } from '@/services/data/firestore-provider';
@@ -16,7 +16,8 @@ import { DataLayer } from '@/services/data-layer';
 import type { Actor, AuthAdapter, DataProvider } from '@/services/data/contract';
 import { localAuth } from '@/services/auth/local-auth';
 import { firebaseAuth } from '@/services/auth/firebase-auth';
-import { readLocalProfile, readProfileClaims } from '@/services/auth/profile-lookup';
+import { readLocalStoredProfile, readStoredProfile, toProfileClaims } from '@/services/auth/profile-lookup';
+import { syncClaimsFromDocument } from '@/services/auth/claims-sync';
 import { setBlobStore } from '@/services/media/blob-store';
 import { permissionsFor, type UiPermissions } from '@/services/policy/policy';
 import type { AuditAction } from '@/types/domain';
@@ -26,10 +27,23 @@ export interface SessionState {
   actor: Actor | null;
   permissions: UiPermissions;
   error: string | null;
+  /**
+   * Set when the deployment is not configured the way it was asked to be (for
+   * example `VITE_DATA_PROVIDER=firebase` without the Firebase keys). The app
+   * keeps working on the safe fallback and the interface says so, instead of
+   * throwing a screen-level error the user cannot act on.
+   */
+  configurationError: string | null;
 }
 
 export class SessionStore {
-  private state: SessionState = { status: 'initialising', actor: null, permissions: permissionsFor(null), error: null };
+  private state: SessionState = {
+    status: 'initialising',
+    actor: null,
+    permissions: permissionsFor(null),
+    error: null,
+    configurationError: null,
+  };
   private listeners = new Set<(state: SessionState) => void>();
   private unsubscribeAuth: (() => void) | null = null;
 
@@ -37,14 +51,20 @@ export class SessionStore {
   readonly auth: AuthAdapter;
   readonly data: DataLayer;
 
-  constructor(provider: DataProvider, auth: AuthAdapter) {
+  constructor(provider: DataProvider, auth: AuthAdapter, configurationError: string | null = null) {
     this.provider = provider;
     this.auth = auth;
     this.data = new DataLayer(provider, () => this.state.actor);
+    this.state = { ...this.state, configurationError };
     api.setTokenProvider(() => this.idToken());
   }
 
   getState = (): SessionState => this.state;
+
+  /** Records a deployment configuration problem for the interface to display. */
+  setConfigurationError(message: string | null): void {
+    this.set({ configurationError: message });
+  }
 
   /** Stable accessor used by providers when building provider-scoped queries. */
   actorRef = (): Actor | null => this.state.actor;
@@ -80,10 +100,11 @@ export class SessionStore {
     try {
       await this.auth.restore();
     } catch (error) {
+      logProviderError('session restore', error);
       const mapped =
         error instanceof AppError
           ? error
-          : new AppError('The service could not be reached. Please check your connection and try again.', 'NETWORK');
+          : new AppError('Unable to connect to the server. Check your connection and try again.', 'NETWORK');
       this.set({ status: 'error', error: mapped.message });
       return;
     }
@@ -110,7 +131,24 @@ export class SessionStore {
     };
     const actor = await adapter.signIn(email, password, remember);
     this.set({ actor, status: 'authenticated' });
-    return actor;
+    return this.state.actor ?? actor;
+  }
+
+  /**
+   * Brings the session token in line with `users/{uid}.role` and re-reads the
+   * session. Used by the diagnostics screen ("Refresh role from the database")
+   * and after an administrator changes a stored role.
+   */
+  async syncRole(): Promise<{ synced: boolean; reason: string | null }> {
+    if (this.provider.kind !== 'firebase') {
+      const actor = await this.auth.refreshClaims();
+      this.set({ actor, status: actor ? 'authenticated' : 'anonymous' });
+      return { synced: true, reason: null };
+    }
+    const result = await syncClaimsFromDocument({ force: true });
+    const actor = await this.auth.refreshClaims();
+    this.set({ actor, status: actor ? 'authenticated' : 'anonymous' });
+    return { synced: result.synced, reason: result.reason };
   }
 
   async signOut(): Promise<void> {
@@ -131,7 +169,10 @@ export class SessionStore {
 
 function buildLocalAuthAdapter(provider: LocalDataProvider): AuthAdapter {
   localAuth.wire({
-    readProfile: (uid) => readLocalProfile(uid, provider),
+    readProfile: (uid) =>
+      readLocalStoredProfile(uid, provider).then((profile) =>
+        profile.exists ? { ...toProfileClaims(profile), roleSource: 'device-session' as const } : null,
+      ),
     writeProfile: async (uid, patch) => {
       const existing = await provider.get('users', uid, null);
       if (existing) {
@@ -189,30 +230,55 @@ function buildLocalAuthAdapter(provider: LocalDataProvider): AuthAdapter {
 
 let instance: SessionStore | null = null;
 
-export function services(): SessionStore {
-  if (instance) return instance;
-
-  if (dataProvider === 'firebase') {
-    if (integrations.misconfigured) {
-      throw new AppError(
-        'VITE_DATA_PROVIDER is pinned to "firebase" but the project configuration is incomplete. Fill in the VITE_FIREBASE_* variables or remove the pin.',
-        'CONFIGURATION',
-      );
-    }
-    const provider = new FirestoreProvider(() => instance?.actorRef() ?? null);
-    firebaseAuth.wire((uid) => readProfileClaims(uid));
-    instance = new SessionStore(provider, firebaseAuth);
-    logRuntimeSummary();
-    return instance;
-  }
-
+/**
+ * Builds the device (IndexedDB) stack. Used when Firebase is not configured and
+ * as the safe fallback when a pinned Firebase configuration turns out to be
+ * incomplete — a half-configured deployment must still open the public site and
+ * say what is wrong, rather than showing an error page on every route.
+ */
+function buildDeviceStack(): SessionStore {
   const provider = new LocalDataProvider();
   setBlobStore({
     put: (key, blob) => provider.putBlob(key, blob),
     get: (key) => provider.getBlob(key),
     delete: (key) => provider.deleteBlob(key),
   });
-  instance = new SessionStore(provider, buildLocalAuthAdapter(provider));
+  return new SessionStore(provider, buildLocalAuthAdapter(provider));
+}
+
+export function services(): SessionStore {
+  if (instance) return instance;
+
+  if (dataProvider === 'firebase') {
+    if (integrations.misconfigured) {
+      const message =
+        'VITE_DATA_PROVIDER is set to "firebase" but the Firebase project configuration is incomplete, so this build is running on device storage. Set the VITE_FIREBASE_* variables (and VITE_DATA_PROVIDER=firebase) in the deployment environment and rebuild.';
+      logProviderError('configuration', new Error(message));
+      const fallback = buildDeviceStack();
+      fallback.setConfigurationError(message);
+      instance = fallback;
+      logRuntimeSummary();
+      return instance;
+    }
+    try {
+      const provider = new FirestoreProvider(() => instance?.actorRef() ?? null);
+      firebaseAuth.wire((uid, email) => readStoredProfile(uid, email));
+      instance = new SessionStore(provider, firebaseAuth);
+      logRuntimeSummary();
+      return instance;
+    } catch (error) {
+      const message =
+        'Firebase could not be initialised in this browser, so the app fell back to device storage. Check the VITE_FIREBASE_* values and this project\'s authorised domains.';
+      logProviderError('firebase initialisation', error);
+      const fallback = buildDeviceStack();
+      fallback.setConfigurationError(message);
+      instance = fallback;
+      logRuntimeSummary();
+      return instance;
+    }
+  }
+
+  instance = buildDeviceStack();
   logRuntimeSummary();
   return instance;
 }

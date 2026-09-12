@@ -146,7 +146,9 @@ export function ServerErrorPage({ error, onRetry }: { error?: Error | null; onRe
             be traced in the audit and server logs.
           </p>
           {error?.message ? (
-            <pre className="mt-4 overflow-x-auto rounded-lg bg-ink-100 p-3 text-[0.72rem] leading-relaxed text-ink-600">{error.message}</pre>
+            <pre className="break-anywhere mt-4 max-h-56 overflow-auto rounded-lg bg-ink-100 p-3 text-[0.72rem] leading-relaxed whitespace-pre-wrap text-ink-600">
+              {error.message}
+            </pre>
           ) : null}
           <div className="mt-6 flex flex-wrap gap-2">
             {onRetry ? (
