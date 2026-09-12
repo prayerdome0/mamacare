@@ -103,11 +103,20 @@ queued with a stated reason. See [`functions/README.md`](functions/README.md).
 
 ## What is implemented
 
-**Public site** (`/`) — hero, About, Services, Maternal-health guidance, Emergency
-guidance, FAQ, Privacy, Contact. This is the first screen; the sign-in page is a route
-like any other, never a landing wall. Exactly sixteen primary maternal-health images are used
-across the site through one reusable `<AppImage>` component (lazy loading, `srcSet`,
-blur-up placeholder, Cloudinary delivery with a local fallback).
+**Public site** (`/`) — thirteen pages, each its own route and its own lazy chunk. The
+landing page is the front door (hero, live platform counts, About and Services summaries,
+workflow, roles, security, FAQ, contact); the informational pages are `/about`,
+`/services`, `/how-it-works`, `/for-clinics`, `/for-mothers`, `/resources`,
+`/maternal-health`, `/emergency`, `/faq`, `/privacy`, `/contact` and `/status`. Two of them
+read real rows through the data layer rather than restating them: `/services` lists the
+facility services catalogue an administrator publishes, and `/for-clinics` lists the
+world-readable facility directory with a search; `/resources` lists the education items
+published to the signed-in reader's audience. Each degrades to a readable explanation when a
+deployment publishes nothing. This is the first screen; the sign-in page is a route like any
+other, never a landing wall. Exactly sixteen primary maternal-health images are used across
+the site through one reusable `<AppImage>` component (lazy loading, `srcSet`, blur-up
+placeholder, Cloudinary delivery with a local fallback). The landing page keeps `#about` and
+`#services` anchors so existing deep links still resolve.
 
 **Authentication** — register, sign in/out, forgot/reset password, change password,
 update profile, deactivate. Roles come from Firebase custom claims

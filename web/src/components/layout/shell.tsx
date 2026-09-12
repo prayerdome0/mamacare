@@ -96,8 +96,9 @@ export const MOTHER_NAV: NavItem[] = [
 ];
 
 export const PUBLIC_NAV = [
-  { to: '/#about', label: 'About' },
-  { to: '/#services', label: 'Services' },
+  { to: '/about', label: 'About' },
+  { to: '/services', label: 'Services' },
+  { to: '/how-it-works', label: 'How it works' },
   { to: '/maternal-health', label: 'Maternal health' },
   { to: '/emergency', label: 'Emergency' },
   { to: '/contact', label: 'Contact' },

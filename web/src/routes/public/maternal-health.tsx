@@ -24,7 +24,7 @@ export default function MaternalHealthPage() {
               <ButtonLink to="/emergency" variant="danger" icon={<ShieldAlert className="size-4" aria-hidden />}>
                 Emergency guidance
               </ButtonLink>
-              <ButtonLink to="/#services" variant="secondary" icon={<ArrowRight className="size-4" aria-hidden />}>
+              <ButtonLink to="/services" variant="secondary" icon={<ArrowRight className="size-4" aria-hidden />}>
                 How the platform helps
               </ButtonLink>
             </div>
@@ -109,7 +109,7 @@ export default function MaternalHealthPage() {
                 MAMA CARE screens the thirteen recognised danger signs at every visit and records a positive “none reported” confirmation, so
                 the absence of symptoms is documented rather than assumed.
               </p>
-              <Link to="/#services" className="mt-3 inline-flex items-center gap-1 text-[0.84rem] font-semibold text-brand-800 hover:underline">
+              <Link to="/services" className="mt-3 inline-flex items-center gap-1 text-[0.84rem] font-semibold text-brand-800 hover:underline">
                 See the visit form and alert rules <ArrowRight className="size-3.5" aria-hidden />
               </Link>
             </div>

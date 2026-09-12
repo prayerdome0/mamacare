@@ -1,13 +1,15 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { Link, useLocation } from 'react-router-dom';
+import { Link, NavLink, useLocation } from 'react-router-dom';
 import { AlertTriangle, ArrowRight, Phone } from 'lucide-react';
 import { cn, telHref } from '@/lib/utils';
 import { Wordmark } from '@/components/layout/wordmark';
+import { AppImage } from '@/components/media/app-image';
 import { ButtonLink, LinkButton } from '@/components/ui/button';
 import { PUBLIC_NAV } from '@/components/layout/shell';
 import { MainMenu, MainMenuButton } from '@/components/layout/main-menu';
 import { useSession } from '@/providers/app-providers';
 import { EMERGENCY_CONTACTS } from '@/config/site-content';
+import type { AppImageKey } from '@/services/media/app-images';
 
 /**
  * Public site chrome. The landing page is the first screen of the product; this
@@ -59,9 +61,21 @@ export function PublicShell({ children }: { children: ReactNode }) {
           <Wordmark />
           <nav aria-label="Primary" className="ml-4 hidden items-center gap-1 lg:flex">
             {PUBLIC_NAV.map((item) => (
-              <Link key={item.to} to={item.to} className="rounded-lg px-3 py-2 text-[0.86rem] font-medium text-ink-600 transition-colors hover:bg-ink-100 hover:text-ink-900">
+              <NavLink
+                key={item.to}
+                to={item.to}
+                // End-match so a section anchor under a page does not mark its
+                // parent as current.
+                end
+                className={({ isActive }) =>
+                  cn(
+                    'rounded-lg px-3 py-2 text-[0.86rem] font-medium transition-colors hover:bg-ink-100 hover:text-ink-900',
+                    isActive ? 'bg-ink-100 text-brand-800' : 'text-ink-600',
+                  )
+                }
+              >
                 {item.label}
-              </Link>
+              </NavLink>
             ))}
           </nav>
           <div className="ml-auto flex items-center gap-2">
@@ -96,7 +110,7 @@ export function PublicFooter() {
   const year = new Date().getFullYear();
   return (
     <footer className="border-t border-ink-200 bg-ink-50">
-      <div className="shell grid gap-8 py-12 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="shell grid gap-8 py-12 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
         <div className="max-w-xs">
           <Wordmark />
           <p className="muted mt-3">
@@ -106,12 +120,23 @@ export function PublicFooter() {
           <p className="caption mt-3">Not a medical device. Alerts indicate recorded findings that need clinical assessment.</p>
         </div>
 
-        <nav aria-label="Product">
+        <nav aria-label="Platform">
           <h3 className="micro mb-3">Platform</h3>
           <ul className="space-y-2 text-[0.86rem]">
-            <li><Link to="/#about" className="text-ink-600 hover:text-brand-800 hover:underline">About MAMA CARE</Link></li>
-            <li><Link to="/#services" className="text-ink-600 hover:text-brand-800 hover:underline">Services</Link></li>
+            <li><Link to="/about" className="text-ink-600 hover:text-brand-800 hover:underline">About MAMA CARE</Link></li>
+            <li><Link to="/services" className="text-ink-600 hover:text-brand-800 hover:underline">Services</Link></li>
+            <li><Link to="/how-it-works" className="text-ink-600 hover:text-brand-800 hover:underline">How it works</Link></li>
             <li><Link to="/maternal-health" className="text-ink-600 hover:text-brand-800 hover:underline">Maternal health</Link></li>
+            <li><Link to="/emergency" className="text-ink-600 hover:text-brand-800 hover:underline">Emergency guidance</Link></li>
+          </ul>
+        </nav>
+
+        <nav aria-label="Who it is for">
+          <h3 className="micro mb-3">Who it is for</h3>
+          <ul className="space-y-2 text-[0.86rem]">
+            <li><Link to="/for-clinics" className="text-ink-600 hover:text-brand-800 hover:underline">For clinics</Link></li>
+            <li><Link to="/for-mothers" className="text-ink-600 hover:text-brand-800 hover:underline">For mothers</Link></li>
+            <li><Link to="/resources" className="text-ink-600 hover:text-brand-800 hover:underline">Resources &amp; reading</Link></li>
             <li><Link to="/contact" className="text-ink-600 hover:text-brand-800 hover:underline">Contact</Link></li>
             <li><Link to="/privacy" className="text-ink-600 hover:text-brand-800 hover:underline">Privacy and data</Link></li>
             <li><Link to="/faq" className="text-ink-600 hover:text-brand-800 hover:underline">Questions &amp; answers</Link></li>
@@ -156,6 +181,56 @@ export function PublicFooter() {
         </div>
       </div>
     </footer>
+  );
+}
+
+/**
+ * The header every informational public page opens with.
+ *
+ * One component so the About, Services, How-it-works, For-clinics, For-mothers
+ * and Resources pages share a hero shape rather than each inventing one — and so
+ * the breadcrumb trail back to the homepage is present on all of them.
+ */
+export function PublicPageHeader({
+  eyebrow,
+  title,
+  lede,
+  actions,
+  image,
+  imageCaption,
+  children,
+}: {
+  eyebrow: string;
+  title: ReactNode;
+  lede?: ReactNode;
+  actions?: ReactNode;
+  /** One of the bundled maternal-health photographs, shown beside the text. */
+  image?: AppImageKey;
+  imageCaption?: string;
+  children?: ReactNode;
+}) {
+  return (
+    <section className="relative overflow-hidden border-b border-ink-200 bg-white">
+      <div className="grid-fade pointer-events-none absolute inset-x-0 top-0 h-72 opacity-60" aria-hidden />
+      <div className={cn('shell relative grid items-center gap-9 py-12 lg:py-16', image && 'lg:grid-cols-[1.05fr_0.95fr]')}>
+        <div className="max-w-2xl">
+          <nav aria-label="Breadcrumb" className="micro mb-3 flex items-center gap-1.5">
+            <Link to="/" className="text-ink-500 hover:text-brand-800 hover:underline">
+              Home
+            </Link>
+            <span aria-hidden className="text-ink-300">
+              /
+            </span>
+            <span className="text-ink-700">{eyebrow}</span>
+          </nav>
+          <h1 className="display-2 mt-1">{title}</h1>
+          {lede ? <p className="lede mt-4">{lede}</p> : null}
+          {actions ? <div className="mt-6 flex flex-wrap items-center gap-2.5">{actions}</div> : null}
+          {children}
+        </div>
+        {image ? <AppImage name={image} ratio="4 / 3" priority caption={imageCaption} /> : null}
+      </div>
+    </section>
   );
 }
 
