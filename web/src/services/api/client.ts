@@ -90,6 +90,15 @@ export class ApiClient {
 
     const payload = await this.safeJson(response);
 
+    // A reply that is not JSON is not this service. On a static host with no
+    // Node runtime, anything the API layer calls comes back as the single-page
+    // application's HTML (or a host error page); treating that as data would
+    // silently hand callers garbage, so it is reported the same way as an
+    // unreachable service.
+    if (payload !== null && (payload as { nonJson?: boolean }).nonJson) {
+      throw new AppError('The secure file service is unreachable. Please try again.', 'NETWORK', { retryable: true });
+    }
+
     if (!response.ok) {
       throw this.mapError(response.status, payload);
     }
