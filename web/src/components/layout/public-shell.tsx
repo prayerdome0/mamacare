@@ -1,10 +1,11 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { AlertTriangle, ArrowRight, Menu, Phone, X } from 'lucide-react';
+import { AlertTriangle, ArrowRight, Phone } from 'lucide-react';
 import { cn, telHref } from '@/lib/utils';
 import { Wordmark } from '@/components/layout/wordmark';
 import { ButtonLink, LinkButton } from '@/components/ui/button';
 import { PUBLIC_NAV } from '@/components/layout/shell';
+import { MainMenu, MainMenuButton } from '@/components/layout/main-menu';
 import { useSession } from '@/providers/app-providers';
 import { EMERGENCY_CONTACTS } from '@/config/site-content';
 
@@ -28,7 +29,7 @@ export function PublicShell({ children }: { children: ReactNode }) {
     return () => window.removeEventListener('scroll', onScroll);
   }, []);
 
-  const workspaceHref = actor?.role === 'MOTHER' ? '/home' : '/app';
+  const workspaceHref = actor?.role === 'MOTHER' ? '/home' : actor?.role === 'ADMIN' ? '/admin' : '/app';
 
   return (
     <div className="flex min-h-dvh flex-col bg-white">
@@ -63,44 +64,24 @@ export function PublicShell({ children }: { children: ReactNode }) {
               </Link>
             ))}
           </nav>
-          <div className="ml-auto hidden items-center gap-2 sm:flex">
-            <Link to="/signin" className="btn btn-ghost btn-sm">
-              Staff sign in
+          <div className="ml-auto flex items-center gap-2">
+            <Link to="/signin" className="btn btn-ghost btn-sm hidden sm:inline-flex">
+              Sign in
             </Link>
-            <ButtonLink to={actor ? workspaceHref : '/register'} size="sm" icon={<ArrowRight className="size-4" aria-hidden />}>
+            <ButtonLink
+              to={actor ? workspaceHref : '/register'}
+              size="sm"
+              className="hidden sm:inline-flex"
+              icon={<ArrowRight className="size-4" aria-hidden />}
+            >
               {actor ? 'Open workspace' : 'Create an account'}
             </ButtonLink>
+            {/* One main menu for every page and every account type. */}
+            <MainMenuButton open={open} onToggle={() => setOpen((value) => !value)} />
           </div>
-          <button
-            type="button"
-            className="btn btn-quiet btn-sm ml-auto size-9 min-h-0 p-0 lg:hidden"
-            onClick={() => setOpen((value) => !value)}
-            aria-expanded={open}
-            aria-label={open ? 'Close menu' : 'Open menu'}
-          >
-            {open ? <X className="size-4" /> : <Menu className="size-4" />}
-          </button>
         </div>
-        {open ? (
-          <div className="border-t border-ink-200 bg-white lg:hidden">
-            <nav aria-label="Mobile" className="shell flex flex-col gap-0.5 py-3">
-              {PUBLIC_NAV.map((item) => (
-                <Link key={item.to} to={item.to} className="nav-link">
-                  {item.label}
-                </Link>
-              ))}
-              <div className="mt-2 flex gap-2 border-t border-ink-200 pt-3">
-                <Link to="/signin" className="btn btn-secondary btn-sm flex-1">
-                  Staff sign in
-                </Link>
-                <ButtonLink to={actor ? workspaceHref : '/register'} size="sm" className="flex-1">
-                  {actor ? 'Open workspace' : 'Create account'}
-                </ButtonLink>
-              </div>
-            </nav>
-          </div>
-        ) : null}
       </header>
+      <MainMenu open={open} onClose={() => setOpen(false)} />
 
       <main id="main" className="flex-1">
         {children}
@@ -133,6 +114,8 @@ export function PublicFooter() {
             <li><Link to="/maternal-health" className="text-ink-600 hover:text-brand-800 hover:underline">Maternal health</Link></li>
             <li><Link to="/contact" className="text-ink-600 hover:text-brand-800 hover:underline">Contact</Link></li>
             <li><Link to="/privacy" className="text-ink-600 hover:text-brand-800 hover:underline">Privacy and data</Link></li>
+            <li><Link to="/faq" className="text-ink-600 hover:text-brand-800 hover:underline">Questions &amp; answers</Link></li>
+            <li><Link to="/status" className="text-ink-600 hover:text-brand-800 hover:underline">Service status</Link></li>
           </ul>
         </nav>
 

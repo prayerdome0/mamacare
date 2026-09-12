@@ -78,6 +78,14 @@ export interface UserProfile {
   /** Server-managed; incremented with every privilege change. */
   privilegeVersion: number;
   pushEnabled?: boolean;
+  /**
+   * ISO 3166-1 alpha-2 country. Zambia is the default for this deployment; the
+   * value is stored per account so reminders, dialling codes and currency are
+   * unambiguous without duplicating a country field elsewhere on the profile.
+   */
+  country?: string | null;
+  /** Preferred language for reminders and reading (e.g. English, Nyanja, Bemba). */
+  preferredLanguage?: string | null;
   createdAt: string;
   createdBy?: string | null;
   updatedAt: string;
@@ -128,6 +136,8 @@ export interface Facility {
   type: FacilityType;
   district: string;
   province: string;
+  /** ISO 3166-1 alpha-2; `ZM` (Zambia) unless the deployment is elsewhere. */
+  country?: string | null;
   address?: string | null;
   phone?: string | null;
   email?: string | null;

@@ -22,27 +22,46 @@ import {
   type Auth,
   type User,
 } from 'firebase/auth';
-import { AppError, toAppError } from '@/lib/errors';
-import type { AccountStatus, AuthClaims, Role } from '@/types/domain';
+import { AppError, logProviderError, toAppError } from '@/lib/errors';
+import { safeSession } from '@/lib/storage';
+import type { AuthClaims } from '@/types/domain';
 import type { Actor, AuthAdapter } from '@/services/data/contract';
 import { getFirebaseAuth } from '@/services/firebase/app';
+import { syncClaimsFromDocument } from '@/services/auth/claims-sync';
+import { normaliseRole, normaliseStatus, resolveRole } from '@/services/auth/role-resolution';
+import type { StoredProfile } from '@/services/auth/profile-lookup';
 
-type ProfileReader = (uid: string) => Promise<AuthClaims & { fullName: string; email: string } | null>;
+/**
+ * Reads `users/{uid}` (the stored role/status). Optional: the adapter works from
+ * the ID token claims alone when no reader is wired.
+ */
+type ProfileReader = (uid: string, email: string) => Promise<StoredProfile>;
 
 const IDLE_LOGOUT_MS = 30 * 60_000;
 const ACTOR_REFRESH_MS = 5 * 60_000;
 
 export class FirebaseAuthAdapter implements AuthAdapter {
   readonly kind = 'firebase' as const;
-  private auth: Auth;
+  private authInstance: Auth | null = null;
   private actor: Actor | null = null;
   private listeners = new Set<(actor: Actor | null) => void>();
   private unsub: (() => void) | null = null;
   private profileReader: ProfileReader | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
 
-  constructor() {
-    this.auth = getFirebaseAuth();
+  /**
+   * Firebase Auth is acquired on first use, never at module load.
+   *
+   * This module is imported by the service registry that every route depends on.
+   * Creating the Auth instance eagerly meant that a build without Firebase
+   * environment variables — a device-mode build, or a static host whose variables
+   * were not configured — threw while the bundle was still evaluating, before any
+   * error boundary could render. The visible result was a blank page / host-level
+   * error on every URL, including sign-in and registration.
+   */
+  private get auth(): Auth {
+    if (!this.authInstance) this.authInstance = getFirebaseAuth();
+    return this.authInstance;
   }
 
   wire(reader: ProfileReader): void {
@@ -83,59 +102,71 @@ export class FirebaseAuthAdapter implements AuthAdapter {
   }
 
   /**
-   * Claims come from the ID token (authoritative). If the token carries no
-   * claims — a freshly registered or unapproved account — the profile is read
-   * for display purposes and marked as such, so privileged reads stay denied by
-   * Firestore rules until an administrator approves the account.
+   * Builds the session actor.
+   *
+   * The role comes from `users/{uid}` (Firestore is the source of truth, per the
+   * platform's role model) and falls back to the ID token claims, which the API
+   * service mints from that same document. When the two disagree — for example
+   * an account made an administrator in the Firebase console — the client asks
+   * the API service to re-mint the claims and then reloads the token, so the
+   * security rules and the interface agree again. Until that succeeds the actor
+   * is marked as unsynced, and screens that need privileged reads explain it
+   * instead of failing with a raw permission error.
    */
-  private async syncActor(user: User): Promise<void> {
+  private async syncActor(user: User, options: { syncClaims?: boolean } = {}): Promise<Actor> {
+    const email = user.email ?? '';
     const token = await user.getIdTokenResult(false);
     const claims = (token.claims ?? {}) as Partial<AuthClaims> & { fullName?: string };
-    let actor: Actor | null = null;
+    const claimsRole = normaliseRole(claims.role);
+    const profile = this.profileReader ? await this.profileReader(user.uid, email).catch(() => null) : null;
 
-    if (claims.role) {
-      actor = {
-        uid: user.uid,
-        email: user.email ?? '',
-        displayName: claims.fullName ?? user.displayName ?? '',
-        role: claims.role as Role,
-        facilityId: (claims.facilityId as string | null) ?? null,
-        accountStatus: ((claims.accountStatus as AccountStatus) ?? 'ACTIVE') as AccountStatus,
-        motherId: (claims.motherId as string | null) ?? null,
-        privilegeVersion: Number(claims.privilegeVersion ?? 1),
-        claimsSource: 'firebase-id-token',
-      };
-    } else if (this.profileReader) {
-      const profile = await this.profileReader(user.uid);
-      if (profile) {
+    const resolution = resolveRole({ documentRole: profile?.role ?? null, claimsRole });
+    const accountStatus = profile?.exists
+      ? profile.status
+      : normaliseStatus(claims.accountStatus, 'PENDING_APPROVAL');
+
+    let actor: Actor = {
+      uid: user.uid,
+      email: email || profile?.email || '',
+      displayName: profile?.fullName || claims.fullName || user.displayName || email,
+      role: resolution.role,
+      facilityId: profile?.exists ? profile.facilityId : ((claims.facilityId as string | null) ?? null),
+      accountStatus,
+      motherId: profile?.exists ? profile.motherId : ((claims.motherId as string | null) ?? null),
+      privilegeVersion: profile?.privilegeVersion ?? Number(claims.privilegeVersion ?? 0),
+      claimsSource: claims.role ? 'firebase-id-token' : 'firebase-profile',
+      roleSource: resolution.roleSource,
+      claimsPendingSync: resolution.needsClaimSync,
+      claimSyncNotice: null,
+      country: profile?.country ?? null,
+    };
+
+    this.emit(actor);
+
+    if (resolution.needsClaimSync && options.syncClaims !== false) {
+      const result = await syncClaimsFromDocument({ force: resolution.escalation });
+      if (result.synced) {
+        await user.getIdTokenResult(true).catch(() => null);
+        const refreshed = await user.getIdTokenResult(false);
+        const refreshedClaims = (refreshed.claims ?? {}) as Partial<AuthClaims>;
+        const refreshedRole = normaliseRole(refreshedClaims.role);
         actor = {
-          uid: user.uid,
-          email: profile.email,
-          displayName: profile.fullName,
-          role: profile.role,
-          facilityId: profile.facilityId ?? null,
-          accountStatus: profile.accountStatus ?? 'PENDING_APPROVAL',
-          motherId: profile.motherId ?? null,
-          privilegeVersion: profile.privilegeVersion ?? 0,
-          claimsSource: 'firebase-profile',
+          ...actor,
+          role: refreshedRole ?? actor.role,
+          roleSource: refreshedRole ? 'custom-claims' : actor.roleSource,
+          claimsSource: refreshedRole ? 'firebase-id-token' : actor.claimsSource,
+          claimsPendingSync: false,
+          claimSyncNotice: null,
+          privilegeVersion: Number(refreshedClaims.privilegeVersion ?? actor.privilegeVersion),
         };
+        this.emit(actor);
+      } else if (result.reason) {
+        actor = { ...actor, claimsPendingSync: true, claimSyncNotice: result.reason };
+        this.emit(actor);
       }
     }
 
-    if (!actor) {
-      actor = {
-        uid: user.uid,
-        email: user.email ?? '',
-        displayName: user.displayName ?? '',
-        role: 'MOTHER',
-        facilityId: null,
-        accountStatus: 'PENDING_APPROVAL',
-        motherId: null,
-        privilegeVersion: 0,
-        claimsSource: 'firebase-profile',
-      };
-    }
-    this.emit(actor);
+    return actor;
   }
 
   private armIdleTimer(): void {
@@ -158,10 +189,7 @@ export class FirebaseAuthAdapter implements AuthAdapter {
     const user = this.auth.currentUser;
     if (!user) return null;
     await user.getIdTokenResult(true).catch(() => null);
-    const refreshed = await user.getIdTokenResult(true);
-    const claims = (refreshed.claims ?? {}) as Partial<AuthClaims> & { fullName?: string };
-    if (!claims.role) return this.actor;
-    await this.syncActor(user);
+    await this.syncActor(user, { syncClaims: false });
     return this.actor;
   }
 
@@ -169,12 +197,11 @@ export class FirebaseAuthAdapter implements AuthAdapter {
     try {
       await setPersistence(this.auth, remember ? browserLocalPersistence : browserSessionPersistence);
       const credential = await signInWithEmailAndPassword(this.auth, email.trim().toLowerCase(), password);
-      await this.syncActor(credential.user);
+      const actor = await this.syncActor(credential.user);
       this.touch();
-      const actor = this.actor;
-      if (!actor) throw new AppError('Sign-in completed but the account could not be loaded. Contact your administrator.', 'CONFIGURATION');
       return actor;
     } catch (error) {
+      logProviderError('firebase sign-in', error);
       throw toAppError(error, 'Sign-in failed. Please check your details and try again.');
     }
   }
@@ -186,8 +213,9 @@ export class FirebaseAuthAdapter implements AuthAdapter {
     await this.auth.signOut().catch(() => null);
     this.emit(null);
     if (reason === 'idle') {
-      // Surfaced by the session hook as a banner on the sign-in screen.
-      sessionStorage.setItem('mamacare.session.notice', 'idle-timeout');
+      // Surfaced by the session hook as a banner on the sign-in screen. Storage
+      // access can throw in private/partitioned contexts — never crash sign-out.
+      safeSession.set('mamacare.session.notice', 'idle-timeout');
     }
   }
 
@@ -206,7 +234,8 @@ export class FirebaseAuthAdapter implements AuthAdapter {
       await this.syncActor(credential.user);
       return { uid: credential.user.uid };
     } catch (error) {
-      throw toAppError(error, 'We could not create your account. Please try again.');
+      logProviderError('firebase registration', error);
+      throw toAppError(error, 'Unable to create your account. Please try again.');
     }
   }
 

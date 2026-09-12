@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import { cn } from '@/lib/utils';
+import { CountUp } from '@/components/ui/count-up';
 
 export function Card({
   title,
@@ -77,6 +78,10 @@ export function StatCard({
       </div>
       {loading ? (
         <span className="skeleton mt-1 block h-8 w-16" />
+      ) : typeof value === 'number' ? (
+        /* Numeric tiles count up from zero once they scroll into view. The value
+           is always a real count from a query — never a decorative number. */
+        <CountUp value={value} className="text-2xl font-bold tracking-tight text-ink-900" durationMs={800} />
       ) : (
         <span className="text-2xl font-bold tracking-tight text-ink-900 tnum">{value}</span>
       )}

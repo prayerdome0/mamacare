@@ -72,6 +72,21 @@ export type Actor = {
    * role but Firestore rules will deny privileged reads.
    */
   claimsSource: 'firebase-id-token' | 'firebase-profile' | 'local-session';
+  /**
+   * Which layer decided `role`: the `users/{uid}` document (authoritative for
+   * display and dashboards), the ID token claims, or the safe default.
+   */
+  roleSource?: 'custom-claims' | 'firestore-document' | 'device-session' | 'default';
+  /**
+   * The stored document and the session token disagree. The request to re-mint
+   * claims has been made (or is pending); until it completes only the screens
+   * the claims allow will read data successfully.
+   */
+  claimsPendingSync?: boolean;
+  /** Set when the token could not be aligned with the stored role, with the reason. */
+  claimSyncNotice?: string | null;
+  /** User's country (ISO 3166-1 alpha-2). Zambia is the default. */
+  country?: string | null;
 };
 
 export interface ListResult<T> {

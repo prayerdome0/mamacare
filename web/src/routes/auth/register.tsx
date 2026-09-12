@@ -8,6 +8,7 @@ import { NoticeState } from '@/components/ui/display';
 import { useForm } from '@/hooks/use-form';
 import { registerSchema } from '@/lib/validation';
 import { registerAccount } from '@/services/auth/registration';
+import { COUNTRIES, countryByCode, defaultCountry, normalisePhone } from '@/config/geo';
 import { services } from '@/services/session-store';
 import { useAsync } from '@/hooks';
 import { useToast } from '@/components/ui/toast';
@@ -57,13 +58,22 @@ export default function RegisterPage() {
     facilityId: '',
     jobTitle: '',
     preferredLanguage: 'English',
+    country: defaultCountry.code,
     acceptTerms: false as unknown as true,
     acceptMarketing: false,
   });
 
+  const selectedCountry = countryByCode(form.values.country) ?? defaultCountry;
+
   const submit = async () => {
     const result = await form.submit(async (values) => {
-      const created = await registerAccount({ ...values, accountKind });
+      // Store the number in international format (+260 97 1234567) so reminders
+      // and the SMS provider see one unambiguous value, whatever was typed.
+      const created = await registerAccount({
+        ...values,
+        accountKind,
+        phone: normalisePhone(values.phone, values.country) || values.phone,
+      });
       if (created.needsApproval) {
         navigate('/pending-approval', { state: { email: created.email } });
         return;
@@ -161,18 +171,68 @@ export default function RegisterPage() {
               invalid={Boolean(form.errors.fullName)}
             />
           </Field>
-          <Field label="Mobile number" error={form.errors.phone} required htmlFor="phone" hint="Used for appointment reminders and follow-up calls.">
+          <Field
+            label="Mobile number"
+            error={form.errors.phone}
+            required
+            htmlFor="phone"
+            hint={`Used for appointment reminders and follow-up calls. ${selectedCountry.name} numbers start ${selectedCountry.dialCode}.`}
+          >
             <TextInput
               id="phone"
               type="tel"
               inputMode="tel"
               autoComplete="tel"
-              placeholder="0971234567 or +260971234567"
+              placeholder={selectedCountry.example}
               value={form.values.phone}
               onValueChange={(phone) => form.setField('phone', phone)}
               onBlur={() => form.blur('phone')}
               invalid={Boolean(form.errors.phone)}
             />
+          </Field>
+        </div>
+
+        {/* Country: Zambia is the deployment default; every other country stays
+            selectable so the platform is usable outside Zambia as well. */}
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field label="Country" error={form.errors.country} required htmlFor="country" hint="Sets the dialling code, currency and reminder wording.">
+            <Select
+              id="country"
+              value={form.values.country}
+              options={COUNTRIES.map((country) => ({
+                value: country.code,
+                label: country.code === defaultCountry.code ? `${country.name} (${country.dialCode}) — default` : `${country.name} (${country.dialCode})`,
+              }))}
+              onValueChange={(code) => {
+                const next = countryByCode(code) ?? defaultCountry;
+                form.setField('country', next.code);
+                // Re-express an already-typed local number for the new country.
+                if (form.values.phone.trim()) form.setField('phone', normalisePhone(form.values.phone, next.code) || form.values.phone);
+              }}
+            />
+          </Field>
+          <Field label={isWorker ? 'Role you are requesting' : 'Preferred language'} htmlFor={isWorker ? 'requestedRole' : 'preferredLanguage'} hint={isWorker ? 'Recorded as a request only. An administrator decides.' : 'Used for your reminders and the reading you are given.'}>
+            {isWorker ? (
+              <Select
+                id="requestedRole"
+                value={form.values.requestedRole ?? 'COMMUNITY_HEALTH_WORKER'}
+                options={REQUESTABLE_ROLES.map((role) => ({ value: role.value, label: role.label }))}
+                onValueChange={(requestedRole) => form.setField('requestedRole', requestedRole as typeof form.values.requestedRole)}
+              />
+            ) : (
+              <Select
+                id="preferredLanguage"
+                value={form.values.preferredLanguage}
+                options={[
+                  { value: 'English', label: 'English' },
+                  { value: 'Nyanja', label: 'Chinyanja' },
+                  { value: 'Bemba', label: 'Ichibemba' },
+                  { value: 'Tonga', label: 'Chitonga' },
+                  { value: 'Lozi', label: 'Silozi' },
+                ]}
+                onValueChange={(preferredLanguage) => form.setField('preferredLanguage', preferredLanguage)}
+              />
+            )}
           </Field>
         </div>
 
@@ -230,33 +290,8 @@ export default function RegisterPage() {
                 />
               )}
             </Field>
-            <Field label="Role you are requesting" htmlFor="requestedRole" hint="Recorded as a request only. An administrator decides.">
-              <Select
-                id="requestedRole"
-                value={form.values.requestedRole ?? 'COMMUNITY_HEALTH_WORKER'}
-                options={REQUESTABLE_ROLES.map((role) => ({ value: role.value, label: role.label }))}
-                onValueChange={(requestedRole) =>
-                  form.setField('requestedRole', requestedRole as typeof form.values.requestedRole)
-                }
-              />
-            </Field>
           </div>
-        ) : (
-          <Field label="Preferred language" htmlFor="preferredLanguage" hint="Used for your reminders and the reading you are given.">
-            <Select
-              id="preferredLanguage"
-              value={form.values.preferredLanguage}
-              options={[
-                { value: 'English', label: 'English' },
-                { value: 'Nyanja', label: 'Chinyanja' },
-                { value: 'Bemba', label: 'Ichibemba' },
-                { value: 'Tonga', label: 'Chitonga' },
-                { value: 'Lozi', label: 'Silozi' },
-              ]}
-              onValueChange={(preferredLanguage) => form.setField('preferredLanguage', preferredLanguage)}
-            />
-          </Field>
-        )}
+        ) : null}
 
         {isWorker ? (
           <Field label="Job title" optional error={form.errors.jobTitle} htmlFor="jobTitle">

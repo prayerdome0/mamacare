@@ -73,6 +73,16 @@ export const app = {
   supportPhone: str(raw.VITE_SUPPORT_PHONE) || '+260 00 000 0000',
   region: str(raw.VITE_FACILITY_REGION) || 'Lusaka Province, Zambia',
   /**
+   * Zambia is the default market: the default country, dialling code and
+   * currency are all Zambian unless the deployment overrides them. Other
+   * countries remain selectable, so the platform stays usable internationally.
+   */
+  defaultCountry: (str(raw.VITE_DEFAULT_COUNTRY) || 'ZM').toUpperCase(),
+  defaultCurrency: (str(raw.VITE_DEFAULT_CURRENCY) || 'ZMW').toUpperCase(),
+  defaultDialCode: str(raw.VITE_DEFAULT_DIAL_CODE) || '+260',
+  /** Shown on the public status page so a deployment can be checked at a glance. */
+  deployedUrl: str(raw.VITE_PUBLIC_URL),
+  /**
    * Emails allowed to self-promote to ADMIN through the server-side bootstrap
    * route (the only path to privileged claims besides an existing admin). The
    * list lives server-side too; this value only pre-fills UI hints.
@@ -109,6 +119,40 @@ function mask(value: string): string {
   if (value.length <= 8) return `${value.slice(0, 2)}••••`;
   return `${value.slice(0, 4)}••••${value.slice(-3)}`;
 }
+
+/**
+ * Environment diagnostics.
+ *
+ * Reports *which* variables a deployment is missing, never their values, so a
+ * sign-in or upload problem caused by configuration can be identified from the
+ * running site (Settings → Diagnostics, and the public /status page) instead of
+ * guessing. `VITE_*` values are public by construction; nothing secret is read
+ * here.
+ */
+export interface EnvCheck {
+  key: string;
+  present: boolean;
+  required: boolean;
+  purpose: string;
+}
+
+export const environmentChecks = (): EnvCheck[] => {
+  const items: EnvCheck[] = [
+    { key: 'VITE_FIREBASE_API_KEY', present: Boolean(firebaseConfig.apiKey), required: false, purpose: 'Firebase Auth + Firestore (the production data path)' },
+    { key: 'VITE_FIREBASE_AUTH_DOMAIN', present: Boolean(firebaseConfig.authDomain), required: false, purpose: 'Firebase Auth domain (must list this site in Authorised domains)' },
+    { key: 'VITE_FIREBASE_PROJECT_ID', present: Boolean(firebaseConfig.projectId), required: false, purpose: 'Firestore project' },
+    { key: 'VITE_FIREBASE_APP_ID', present: Boolean(firebaseConfig.appId), required: false, purpose: 'Firebase web app id' },
+    { key: 'VITE_FIREBASE_STORAGE_BUCKET', present: Boolean(firebaseConfig.storageBucket), required: false, purpose: 'Storage bucket reference' },
+    { key: 'VITE_FIREBASE_MESSAGING_SENDER_ID', present: Boolean(firebaseConfig.messagingSenderId), required: false, purpose: 'Browser push' },
+    { key: 'VITE_FIREBASE_VAPID_KEY', present: Boolean(app.fcmVapidKey), required: false, purpose: 'Web Push certificate for background notifications' },
+    { key: 'VITE_CLOUDINARY_CLOUD_NAME', present: cloudinary.enabled, required: false, purpose: 'Public image delivery' },
+    { key: 'VITE_CLOUDINARY_UPLOAD_PRESET', present: Boolean(cloudinary.unsignedPreset), required: false, purpose: 'Browser uploads to public folders' },
+  ];
+  if (forcedProvider === 'firebase') {
+    for (const item of items.slice(0, 4)) items[items.indexOf(item)] = { ...item, required: true };
+  }
+  return items;
+};
 
 export const firebase = firebaseConfig;
 export const cloudinaryConfig = cloudinary;

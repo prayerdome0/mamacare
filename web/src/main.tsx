@@ -2,6 +2,7 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import App from '@/App';
 import { app, dataProvider, logRuntimeSummary } from '@/config/env';
+import { safeLocal } from '@/lib/storage';
 import '@/index.css';
 
 logRuntimeSummary();
@@ -24,21 +25,12 @@ createRoot(root).render(
  */
 const SEEDED_FLAG = 'mamacare.demo-seeded';
 if (dataProvider === 'local' && app.demoSeed) {
-  let flagged = false;
-  try {
-    flagged = localStorage.getItem(SEEDED_FLAG) === '1';
-  } catch {
-    flagged = false;
-  }
+  const flagged = safeLocal.get(SEEDED_FLAG) === '1';
   if (!flagged) {
     void import('@/services/demo/dataset')
       .then(({ seedDemonstrationData }) => seedDemonstrationData())
       .then((summary) => {
-        try {
-          localStorage.setItem(SEEDED_FLAG, '1');
-        } catch {
-          /* private mode — seeding still happened */
-        }
+        safeLocal.set(SEEDED_FLAG, '1');
         console.info(
           `[mamacare] demonstration data ready: ${summary.facilities} facilities, ${summary.users} accounts, ${summary.mothers} mothers, ${summary.alerts} alerts.`,
         );
@@ -46,13 +38,7 @@ if (dataProvider === 'local' && app.demoSeed) {
       .catch((error: unknown) => {
         const message = error instanceof Error ? error.message : 'unknown error';
         if (!/already exists/i.test(message)) console.warn('[mamacare] demonstration seeding was skipped:', message);
-        else {
-          try {
-            localStorage.setItem(SEEDED_FLAG, '1');
-          } catch {
-            /* ignore */
-          }
-        }
+        else safeLocal.set(SEEDED_FLAG, '1');
       });
   }
 }

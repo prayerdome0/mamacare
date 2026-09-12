@@ -15,6 +15,8 @@
  */
 
 import { AppError } from '@/lib/errors';
+import { safeLocal } from '@/lib/storage';
+import { normaliseRole, normaliseStatus, type RoleSource } from '@/services/auth/role-resolution';
 import { newId } from '@/lib/ids';
 import type { AccountStatus, AuthClaims, Role } from '@/types/domain';
 import type { Actor, AuthAdapter } from '@/services/data/contract';
@@ -159,32 +161,24 @@ export async function createCredential(uid: string, email: string, password: str
 
 /* ── Session tokens ──────────────────────────────────────────────────── */
 
+/**
+ * Session persistence never throws: in private or partitioned contexts the
+ * browser refuses `localStorage`, and a refused write must not fail the
+ * sign-in. The value stays in memory for the life of the tab, and the shell
+ * reports that the session will not survive a reload (see `storageAvailable`).
+ */
 const readSession = (): LocalSession | null => {
-  try {
-    const raw = localStorage.getItem(SESSION_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as LocalSession;
-    if (!parsed?.token || !parsed.uid) return null;
-    return parsed;
-  } catch {
-    return null;
-  }
+  const parsed = safeLocal.getJson<LocalSession | null>(SESSION_KEY, null);
+  if (!parsed?.token || !parsed.uid) return null;
+  return parsed;
 };
 
 const writeSession = (session: LocalSession): void => {
-  try {
-    localStorage.setItem(SESSION_KEY, JSON.stringify(session));
-  } catch {
-    throw new AppError('This browser is blocking local storage, so you cannot stay signed in.', 'CONFIGURATION');
-  }
+  safeLocal.setJson(SESSION_KEY, session);
 };
 
 const clearSession = (): void => {
-  try {
-    localStorage.removeItem(SESSION_KEY);
-  } catch {
-    /* nothing to clear */
-  }
+  safeLocal.remove(SESSION_KEY);
 };
 
 export function readStoredSession(): LocalSession | null {
@@ -206,7 +200,9 @@ export const touchSession = (): void => {
 
 /* ── Adapter ─────────────────────────────────────────────────────────── */
 
-type ProfileReader = (uid: string) => Promise<AuthClaims & { fullName: string; email: string } | null>;
+type ProfileReader = (
+  uid: string,
+) => Promise<(AuthClaims & { fullName: string; email: string; roleSource?: RoleSource }) | null>;
 type ProfileWriter = (
   uid: string,
   patch: { fullName?: string; email?: string; role?: Role; photoUrl?: string | null },
@@ -261,17 +257,24 @@ export class LocalAuth implements AuthAdapter {
     this.emit(await this.buildActor(session.uid, claims));
   }
 
-  private async buildActor(uid: string, claims: AuthClaims & { fullName: string; email: string }): Promise<Actor> {
+  private async buildActor(
+    uid: string,
+    claims: AuthClaims & { fullName: string; email: string; roleSource?: RoleSource },
+  ): Promise<Actor> {
     return {
       uid,
       email: claims.email,
       displayName: claims.fullName,
-      role: claims.role,
+      // The device provider stores the role on the user document, so the
+      // document is the source of truth here too — same precedence as Firebase.
+      role: normaliseRole(claims.role) ?? 'MOTHER',
+      roleSource: claims.roleSource ?? 'device-session',
       facilityId: claims.facilityId ?? null,
-      accountStatus: (claims.accountStatus ?? 'ACTIVE') as AccountStatus,
+      accountStatus: normaliseStatus(claims.accountStatus, 'ACTIVE'),
       motherId: claims.motherId ?? null,
       privilegeVersion: claims.privilegeVersion ?? 1,
       claimsSource: 'local-session',
+      claimsPendingSync: false,
     };
   }
 

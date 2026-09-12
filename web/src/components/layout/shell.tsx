@@ -12,15 +12,14 @@ import {
   Heart,
   LayoutDashboard,
   LogOut,
-  Menu,
   Settings,
   Shield,
   Stethoscope,
   UserCog,
   Users,
-  X,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { MainMenu, MainMenuButton } from '@/components/layout/main-menu';
 import { useSession } from '@/providers/app-providers';
 import { useNavScope } from '@/components/layout/nav-scope';
 import { useLiveQuery } from '@/hooks';
@@ -105,7 +104,7 @@ export function AppShell({
   const shellNav = nav ?? scope.nav;
   const shellTone = tone ?? scope.tone;
   const location = useLocation();
-  const [open, setOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
 
   // Unread in-app messages for this account. A real count from the notification
   // collection — the badge is never a placeholder.
@@ -116,7 +115,7 @@ export function AppShell({
   }, { enabled: Boolean(actor) });
   const alertCount = inbox.data.filter((row) => !row.readAt).length;
 
-  useEffect(() => setOpen(false), [location.pathname]);
+  useEffect(() => setMenuOpen(false), [location.pathname]);
 
   const items = shellNav.filter((item) => item.show(permissions, actor?.role));
 
@@ -124,15 +123,11 @@ export function AppShell({
     <div className="flex min-h-dvh flex-col bg-ink-50">
       <header className="sticky top-0 z-30 border-b border-ink-200 bg-white/95 backdrop-blur">
         <div className="flex h-14 items-center gap-3 px-3 sm:px-5">
-          <button
-            type="button"
-            onClick={() => setOpen((value) => !value)}
-            className="btn btn-quiet btn-sm size-9 min-h-0 p-0 lg:hidden"
-            aria-label={open ? 'Close menu' : 'Open menu'}
-            aria-expanded={open}
-          >
-            {open ? <X className="size-4" /> : <Menu className="size-4" />}
-          </button>
+          {/* On phones this button opens the main menu, which contains this
+              workspace's sections as well as the account and help pages; on
+              larger screens the sidebar is already visible and the same menu
+              adds everything outside the workspace. */}
+          <MainMenuButton open={menuOpen} onToggle={() => setMenuOpen((value) => !value)} tone="quiet" />
           <Wordmark compact href={shellTone === 'mother' ? '/home' : actor?.role === 'ADMIN' ? '/admin' : '/app'} />
           <span className="hidden sm:block">
             <Badge tone={shellTone === 'mother' ? 'green' : 'brand'}>{shellTone === 'mother' ? 'For mothers' : actor ? ROLE_LABELS[actor.role] : ''}</Badge>
@@ -163,13 +158,15 @@ export function AppShell({
         </div>
       </header>
 
+      <MainMenu open={menuOpen} onClose={() => setMenuOpen(false)} />
+
       <div className="flex flex-1 items-start">
+        {/* The workspace sidebar is a desktop affordance. On phones and small
+            tablets the same links live in the main menu, so nothing is only
+            reachable through a control that does not fit the screen. */}
         <nav
           aria-label="Workspace sections"
-          className={cn(
-            'w-full shrink-0 border-ink-200 bg-white p-3 lg:sticky lg:top-14 lg:block lg:h-[calc(100dvh-3.5rem)] lg:w-60 lg:overflow-y-auto lg:border-r',
-            open ? 'block border-b' : 'hidden',
-          )}
+          className="hidden w-full shrink-0 border-ink-200 bg-white p-3 lg:sticky lg:top-14 lg:block lg:h-[calc(100dvh-3.5rem)] lg:w-60 lg:overflow-y-auto lg:border-r"
         >
           <ul className="space-y-0.5">
             {items.map((item) => (

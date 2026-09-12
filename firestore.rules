@@ -107,35 +107,54 @@ service cloud.firestore {
       return mid != null && (data.get(['motherId']) == mid || resource.id == mid);
     }
 
-    /** True when the patch tries to move a row between facilities. */
+    /**
+     * True when a patch moves a row between facilities.
+     *
+     * The rules language has no loop construct — an earlier revision of this file
+     * used `for (let key in keys)`, which the compiler rejects, so the file could
+     * not be deployed at all. `Map.diff(...).affectedKeys()` is the supported way
+     * to ask exactly the same question, and it needs no iteration.
+     */
     function changesFacilityKeys(before, after) {
-      let keys = ['facilityId', 'registrationFacilityId', 'careFacilityId', 'originFacilityId', 'receivingFacilityId'];
-      for (let key in keys) {
-        let field = keys[key];
-        if (after.keys().hasAll([field]) && before.get([field]) != after.get([field])) {
-          return true;
-        }
-      }
-      return false;
+      return after.diff(before).affectedKeys().hasAny([
+        'facilityId',
+        'registrationFacilityId',
+        'careFacilityId',
+        'originFacilityId',
+        'receivingFacilityId'
+      ]);
     }
 
-    /** Privileged user fields a client may never write about itself (or others). */
-    function patchTouchesPrivilege(after) {
-      let privileged = ['role', 'status', 'privilegeVersion', 'accountKind', 'motherId'];
-      for (let key in privileged) {
-        let field = privileged[key];
-        if (after.keys().hasAny([field])) return true;
-      }
-      return false;
+    /**
+     * True when a patch touches a field only an administrator or the API service
+     * may change. Compared against the *changed* keys, not the whole document:
+     * every stored user row contains `role`, so testing the document's keys would
+     * have blocked a person from editing their own name or phone number.
+     */
+    function patchTouchesPrivilege(before, after) {
+      return after.diff(before).affectedKeys().hasAny([
+        'role',
+        'status',
+        'privilegeVersion',
+        'accountKind',
+        'motherId',
+        'facilityId',
+        'requestedRole'
+      ]);
     }
 
     /** Fields a mother may never alter on her own record. */
-    function patchTouchesClinicalData(after) {
-      let guarded = ['riskLevel', 'currentPregnancyId', 'gestationalSnapshot', 'eddSnapshot', 'consent', 'assignedChwUserId', 'registrationFacilityId', 'status'];
-      for (let key in guarded) {
-        if (after.keys().hasAny([guarded[key]])) return true;
-      }
-      return false;
+    function patchTouchesClinicalData(before, after) {
+      return after.diff(before).affectedKeys().hasAny([
+        'riskLevel',
+        'currentPregnancyId',
+        'gestationalSnapshot',
+        'eddSnapshot',
+        'consent',
+        'assignedChwUserId',
+        'registrationFacilityId',
+        'status'
+      ]);
     }
 
     function noDelete() {
@@ -165,16 +184,21 @@ service cloud.firestore {
 
       // Sign-up writes exactly one document: its own uid, with a non-privileged
       // role and a status the client is allowed to declare.
+      //
+      // `privilegeVersion` is server-managed. A client may omit it (the current
+      // client does) or send the initial value `1`; any other value is refused,
+      // so this is not a way to escape the revocation check in the API service.
       allow create: if signedIn()
         && userId == uid()
         && request.resource.data.role in ['MIDWIFE', 'NURSE', 'COMMUNITY_HEALTH_WORKER', 'FACILITY_SUPERVISOR', 'MOTHER']
         && request.resource.data.status in ['PENDING_APPROVAL', 'ACTIVE']
-        && !request.resource.data.keys().hasAny(['privilegeVersion']);
+        && (!request.resource.data.keys().hasAny(['privilegeVersion'])
+            || request.resource.data.privilegeVersion == 1);
 
       // A person may edit their own contact details — never their privileges.
       // Role, status, facility, account kind and motherId are all admin/API only.
       allow update: if isAdmin()
-        || (signedIn() && userId == uid() && !patchTouchesPrivilege(request.resource.data));
+        || (signedIn() && userId == uid() && !patchTouchesPrivilege(resource.data, request.resource.data));
 
       // Accounts are deactivated, never deleted, so the audit trail resolves.
       allow delete: if false;
@@ -193,8 +217,8 @@ service cloud.firestore {
 
       allow update: if isAdmin()
         || (isClinicalWriter() && approved() && sameFacility(resource.data) && !changesFacilityKeys(resource.data, request.resource.data))
-        || (isChw() && approved() && sameFacility(resource.data) && !patchTouchesClinicalData(request.resource.data) && !changesFacilityKeys(resource.data, request.resource.data))
-        || (ownedByMother(resource.data) && !patchTouchesClinicalData(request.resource.data) && !changesFacilityKeys(resource.data, request.resource.data));
+        || (isChw() && approved() && sameFacility(resource.data) && !patchTouchesClinicalData(resource.data, request.resource.data) && !changesFacilityKeys(resource.data, request.resource.data))
+        || (ownedByMother(resource.data) && !patchTouchesClinicalData(resource.data, request.resource.data) && !changesFacilityKeys(resource.data, request.resource.data));
 
       allow delete: if false;
     }
@@ -328,6 +352,30 @@ service cloud.firestore {
         && request.resource.data.actorName == claim('name')
         && request.resource.data.actorRole == role();
       allow update, delete: if false;
+    }
+
+    /* ── counters (canonical patient ids) ───────────────────────────── */
+
+    // Patient ids come from a server-side counter so two devices can never mint
+    // the same one. The row holds a single number; nobody may delete it, and
+    // only approved staff (or an administrator) may move it forward.
+    match /counters/{counterId} {
+      function counterWritable() {
+        return (isStaff() && approved()) || isAdmin();
+      }
+      function counterShape() {
+        return request.resource.data.keys().hasOnly(['value', 'updatedAt', 'id', 'createdAt', 'createdBy'])
+          && request.resource.data.value is int
+          && request.resource.data.value >= 0;
+      }
+
+      allow get: if counterWritable();
+      allow list: if isAdmin();
+      allow create: if counterWritable() && counterShape();
+      // A counter only ever moves forward; a stale device cannot rewind it.
+      allow update: if counterWritable() && counterShape()
+        && request.resource.data.value >= resource.data.value;
+      allow delete: if false;
     }
 
     /* ── anything else is closed ────────────────────────────────────── */

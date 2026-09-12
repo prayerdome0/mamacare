@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AppError, errorDisplay, toAppError } from '@/lib/errors';
+import { safeLocal } from '@/lib/storage';
 import { services } from '@/services/session-store';
 import type { CollectionName, ListResult, RowOf } from '@/services/data/contract';
 import type { QuerySpec } from '@/types/domain';
@@ -196,23 +197,13 @@ export function useDebouncedValue<T>(value: T, delay = 250): T {
 }
 
 export function useLocalState<T>(key: string, initial: T): [T, (value: T | ((current: T) => T)) => void] {
-  const [value, setValue] = useState<T>(() => {
-    try {
-      const raw = localStorage.getItem(key);
-      return raw ? (JSON.parse(raw) as T) : initial;
-    } catch {
-      return initial;
-    }
-  });
+  const [value, setValue] = useState<T>(() => safeLocal.getJson<T>(key, initial));
   const update = useCallback(
     (next: T | ((current: T) => T)) => {
       setValue((current) => {
         const resolved = typeof next === 'function' ? (next as (value: T) => T)(current) : next;
-        try {
-          localStorage.setItem(key, JSON.stringify(resolved));
-        } catch {
-          /* storage quota or private mode — state still works in memory */
-        }
+        // Never throws: private mode and blocked storage fall back to memory.
+        safeLocal.setJson(key, resolved);
         return resolved;
       });
     },

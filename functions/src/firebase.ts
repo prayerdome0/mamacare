@@ -121,13 +121,21 @@ export async function verifyIdToken(raw: string): Promise<ActorClaims> {
   }
   const claims = toClaims(token);
 
-  // Privilege revocation: the profile carries the current version, so a token
-  // minted before a role change or a deactivation stops working immediately.
+  // Deactivation is checked on every call: a suspended account cannot use the
+  // API even with an unexpired token.
   const profile = await dbOrThrow().collection('users').doc(claims.uid).get();
   if (profile.exists) {
-    const data = profile.data() as { privilegeVersion?: number; status?: string; role?: string; facilityId?: string | null } | undefined;
-    if (data?.status === 'SUSPENDED') throw forbidden('This account has been deactivated by an administrator.');
-    if (typeof data?.privilegeVersion === 'number' && data.privilegeVersion > claims.privilegeVersion) {
+    const data = profile.data() as { privilegeVersion?: number; status?: string; accountStatus?: string; role?: string; facilityId?: string | null } | undefined;
+    const status = (data?.status ?? data?.accountStatus ?? '').toString().toUpperCase();
+    if (status === 'SUSPENDED') throw forbidden('This account has been deactivated by an administrator.');
+
+    // Privilege revocation applies to tokens this service has minted. A token
+    // with no `privilegeVersion` has never been through a role change (a brand
+    // new account, or one whose role was just set in Firestore and is being
+    // synchronised) — denying those would lock people out of the very route
+    // that fixes it. `accountStatus`/role checks still apply per route.
+    const minted = typeof claims.privilegeVersion === 'number' && claims.privilegeVersion > 0;
+    if (minted && typeof data?.privilegeVersion === 'number' && data.privilegeVersion > claims.privilegeVersion) {
       throw unauthorized('Your permissions changed. Please sign in again to continue.');
     }
   }

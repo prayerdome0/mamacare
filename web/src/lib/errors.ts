@@ -42,20 +42,38 @@ export const isAppError = (e: unknown): e is AppError => e instanceof AppError;
 /** Firebase auth error codes → user language. Codes only, never payloads. */
 const AUTH_MESSAGES: Record<string, string> = {
   'auth/invalid-email': 'Enter a valid email address.',
-  'auth/invalid-credential': 'Email or password is incorrect.',
-  'auth/wrong-password': 'Email or password is incorrect.',
-  'auth/user-not-found': 'No account exists with that email address.',
-  'auth/email-already-in-use': 'That email address already has an account. Sign in instead.',
+  'auth/missing-email': 'Enter your email address.',
+  'auth/missing-password': 'Enter your password.',
+  'auth/invalid-credential': 'Invalid email or password.',
+  'auth/invalid-login-credentials': 'Invalid email or password.',
+  'auth/wrong-password': 'Invalid email or password.',
+  'auth/user-not-found': 'This account does not exist. Check the address, or create an account.',
+  'auth/email-already-in-use': 'This email is already registered. Sign in instead, or reset the password.',
   'auth/weak-password': 'Your password does not meet the minimum security requirements.',
   'auth/user-disabled': 'This account has been deactivated. Contact your administrator.',
   'auth/too-many-requests': 'Too many attempts. Please wait a moment and try again.',
-  'auth/network-request-failed': 'Cannot reach the authentication service. Check your connection.',
+  'auth/network-request-failed': 'Unable to connect to the server. Check your connection and try again.',
   'auth/requires-recent-login': 'For your security, please sign in again before changing this.',
   'auth/invalid-action-code': 'This link is invalid or has already been used. Request a new one.',
   'auth/expired-action-code': 'This link has expired. Request a new one.',
+  'auth/missing-action-code': 'This reset link is incomplete. Request a new one from the sign-in screen.',
   'auth/popup-closed-by-user': 'The sign-in window was closed before finishing.',
-  'auth/operation-not-allowed': 'This sign-in method is not enabled for this project.',
+  'auth/popup-blocked': 'Your browser blocked the sign-in window. Allow pop-ups for this site and try again.',
+  'auth/cancelled-popup-request': 'The sign-in window was closed before finishing.',
+  'auth/operation-not-allowed': 'Email and password sign-in is not enabled for this project yet. Ask the platform administrator to enable it in Firebase Authentication.',
+  'auth/configuration-not-found': 'Firebase Authentication is not configured for this project yet. The administrator must enable the Email/Password sign-in method.',
+  'auth/unauthorized-domain': 'This website address is not authorised for sign-in. Ask the administrator to add this domain to Firebase Authentication → Settings → Authorised domains.',
+  'auth/invalid-api-key': 'The Firebase configuration on this deployment is not valid. Ask the administrator to check the VITE_FIREBASE_* values.',
+  'auth/api-key-not-valid': 'The Firebase configuration on this deployment is not valid. Ask the administrator to check the VITE_FIREBASE_* values.',
+  'auth/internal-error': 'The sign-in service returned an unexpected response. Please try again; if it continues, the project configuration needs checking.',
+  'auth/quota-exceeded': 'The sign-in service is busy right now. Please try again in a few minutes.',
+  'auth/operation-not-supported-in-this-environment': 'This browser cannot complete the sign-in. Use a normal (not private) window, or a different browser.',
   'auth/persistence-failed': 'Secure storage is unavailable in this browser. Try a normal (not private) window.',
+  'auth/web-storage-unsupported': 'This browser blocks the storage sign-in needs. Enable cookies for this site, or use a normal window.',
+  'auth/argument-error': 'Those sign-in details are not in the expected format. Check your email address and password.',
+  'auth/account-exists-with-different-credential': 'An account already exists with this email using a different sign-in method.',
+  'auth/multi-factor-auth-required': 'This account needs a second verification step. Contact your administrator.',
+  'auth/timeout': 'The sign-in service did not respond in time. Please try again.',
 };
 
 const FIRESTORE_HINTS: Record<string, string> = {
@@ -65,7 +83,26 @@ const FIRESTORE_HINTS: Record<string, string> = {
   'already-exists': 'That record already exists.',
   'failed-precondition': 'This view needs a database index that has not been deployed yet.',
   resource_exhausted: 'Too many requests. Please try again shortly.',
+  unauthenticated: 'Your session has expired. Please sign in again.',
+  cancelled: 'The operation was cancelled before it finished.',
+  'data-loss': 'A data problem was detected. The change was not applied.',
 };
+
+/**
+ * Developer-facing log for a failed provider call.
+ *
+ * The user sees a short sentence; the console gets the operation, the provider
+ * error code and the message, which is what makes a real deployment problem
+ * diagnosable. No credential, token or patient value is ever logged.
+ */
+export function logProviderError(scope: string, error: unknown): void {
+  const err = error as { code?: unknown; name?: unknown; message?: unknown } | null;
+  const code = typeof err?.code === 'string' ? err.code : undefined;
+  const name = typeof err?.name === 'string' ? err.name : undefined;
+  const message = typeof err?.message === 'string' ? err.message : String(error);
+  console.error(`[mamacare] ${scope} failed`, { code, name, message });
+}
+
 
 function codeFromUnknown(code: unknown): ErrorCode | null {
   if (typeof code !== 'string') return null;
@@ -91,8 +128,15 @@ export function toAppError(error: unknown, fallback = 'Something went wrong. Ple
   if (authMapped) return new AppError(authMapped, (code as string) === 'auth/too-many-requests' ? 'RATE_LIMIT' : 'UNAUTHENTICATED');
 
   const mappedCode = codeFromUnknown(code);
+  const providerHint = typeof code === 'string' ? FIRESTORE_HINTS[code] : undefined;
+  if (providerHint && !mappedCode) {
+    // A recognisable provider code we do not otherwise classify (for example
+    // `failed-precondition`, which usually means an index has not been deployed)
+    // still deserves its specific explanation rather than the generic fallback.
+    return new AppError(providerHint, 'UNKNOWN');
+  }
   if (mappedCode) {
-    const hint = typeof code === 'string' ? FIRESTORE_HINTS[code] : undefined;
+    const hint = providerHint;
     const retryable = mappedCode === 'NETWORK';
     return new AppError(
       hint ??
@@ -133,6 +177,16 @@ export function errorDisplay(error: unknown, fallback = 'Something went wrong.')
 }
 
 export const AUTH_EXPIRED_MESSAGE = 'Your session has expired. Please sign in again.';
+
+/** Structured, secret-free view of any error — used by the diagnostics screen and logs. */
+export function describeError(error: unknown): { code: string | null; name: string; message: string } {
+  const err = error as { code?: unknown; name?: unknown; message?: unknown } | null;
+  return {
+    code: typeof err?.code === 'string' ? err.code : null,
+    name: typeof err?.name === 'string' ? err.name : 'Error',
+    message: typeof err?.message === 'string' ? err.message : String(error),
+  };
+}
 
 /**
  * Retries only transient failures, with jittered backoff. Validation/permission

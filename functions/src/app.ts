@@ -2,6 +2,7 @@ import express, { type Express, type Request, type Response } from 'express';
 import { env, redactedSummary } from './env.js';
 import { adminStatus } from './firebase.js';
 import { forbidden, rateLimit, securityHeaders, sendError } from './http.js';
+import { authRouter } from './routes/auth.js';
 import { mediaRouter } from './routes/media.js';
 import { adminRouter } from './routes/admin.js';
 import { notificationsRouter, notificationsStatus } from './routes/notifications.js';
@@ -50,6 +51,7 @@ export function createApp(): Express {
     });
   });
 
+  router.use('/auth', authRouter);
   router.use('/media', mediaRouter);
   router.use('/admin', adminRouter);
   router.use('/notifications', notificationsRouter);
@@ -90,6 +92,8 @@ export function createApp(): Express {
       service: 'mamacare-api',
       routes: [
         '/health',
+        '/auth/sync-claims',
+        '/auth/stored-role',
         '/media/policy',
         '/media/sign',
         '/media/sign-url',

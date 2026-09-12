@@ -24,6 +24,7 @@ import { useSession } from '@/providers/app-providers';
 import { telHref } from '@/lib/utils';
 import { FaqList } from '@/routes/public/faq';
 import { ContactForm } from '@/routes/public/contact-form';
+import { LiveStats } from '@/routes/public/live-stats';
 
 export default function LandingPage() {
   useHashScroll();
@@ -45,13 +46,36 @@ export default function LandingPage() {
               that point to the assessment a finding requires, referrals that arrive complete, and mothers who can see their own next
               appointment.
             </p>
+            {/* The first action for a visitor is to look around. Registration is
+                offered, never required: this page is the front door, not a gate. */}
             <div className="mt-7 flex flex-wrap items-center gap-3">
-              <ButtonLink to={actor ? (actor.role === 'MOTHER' ? '/home' : '/app') : '/register'} size="lg" icon={<ArrowRight className="size-4" aria-hidden />}>
-                {actor ? 'Open your workspace' : 'Create an account'}
-              </ButtonLink>
-              <ButtonLink to="/signin" variant="secondary" size="lg">
-                Staff sign in
-              </ButtonLink>
+              {actor ? (
+                <ButtonLink
+                  to={actor.role === 'MOTHER' ? '/home' : actor.role === 'ADMIN' ? '/admin' : '/app'}
+                  size="lg"
+                  icon={<ArrowRight className="size-4" aria-hidden />}
+                >
+                  Open your workspace
+                </ButtonLink>
+              ) : (
+                <ButtonLink to="/#services" size="lg" icon={<ArrowRight className="size-4" aria-hidden />}>
+                  See what the platform does
+                </ButtonLink>
+              )}
+              {!actor ? (
+                <>
+                  <ButtonLink to="/register" variant="secondary" size="lg">
+                    Create an account
+                  </ButtonLink>
+                  <Link to="/signin" className="btn btn-ghost btn-lg">
+                    Sign in
+                  </Link>
+                </>
+              ) : (
+                <ButtonLink to="/maternal-health" variant="secondary" size="lg">
+                  Maternal health guidance
+                </ButtonLink>
+              )}
               <Link to="/emergency" className="inline-flex items-center gap-1.5 text-[0.84rem] font-semibold text-[var(--color-risk-red-text)] hover:underline">
                 <LifeBuoy className="size-4" aria-hidden />
                 Emergency guidance
@@ -91,6 +115,22 @@ export default function LandingPage() {
               </p>
             </div>
           </div>
+        </div>
+      </section>
+
+      {/* ── Live platform statistics ─────────────────────────────────── */}
+      <section className="border-y border-ink-200 bg-white py-10 sm:py-12">
+        <div className="shell">
+          <div className="mb-6 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+            <div>
+              <p className="section-eyebrow">This deployment, counted</p>
+              <h2 className="display-2 mt-1">What the platform is holding right now</h2>
+            </div>
+            <p className="muted max-w-md text-[0.88rem]">
+              Counts are read from the database as the page loads. Nothing on this site is a placeholder number.
+            </p>
+          </div>
+          <LiveStats />
         </div>
       </section>
 

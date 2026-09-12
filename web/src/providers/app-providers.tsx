@@ -17,6 +17,8 @@ export interface SessionContextValue extends SessionState {
   signIn: (email: string, password: string, remember?: boolean) => Promise<Actor>;
   signOut: () => Promise<void>;
   refresh: () => Promise<void>;
+  /** Re-reads the stored role from Firestore and re-mints the session claims. */
+  syncRole: () => Promise<{ synced: boolean; reason: string | null }>;
   configurationWarning: string | null;
 }
 
@@ -53,7 +55,12 @@ function SessionProvider({ children }: { children: ReactNode }) {
     toast.info('Signed out');
   }, [registry, toast]);
 
+  const syncRole = useCallback(() => registry.syncRole(), [registry]);
+
   const configurationWarning = useMemo(() => {
+    if (state.configurationError) {
+      return state.configurationError;
+    }
     if (misconfigured) {
       return 'Firebase project configuration is incomplete, so the app is storing records on this device. Add the VITE_FIREBASE_* values from your Firebase project to web/.env.local, or run the API service for signed uploads.';
     }
@@ -61,7 +68,7 @@ function SessionProvider({ children }: { children: ReactNode }) {
       return 'Cloudinary is not configured, so uploaded files are kept on this device only. Set the public environment variables described in web/.env.example.';
     }
     return null;
-  }, []);
+  }, [state.configurationError]);
 
   const value = useMemo<SessionContextValue>(
     () => ({
@@ -71,9 +78,10 @@ function SessionProvider({ children }: { children: ReactNode }) {
       signIn,
       signOut,
       refresh: () => registry.refresh(),
+      syncRole,
       configurationWarning,
     }),
-    [state, registry, signIn, signOut, configurationWarning],
+    [state, registry, signIn, signOut, syncRole, configurationWarning],
   );
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;

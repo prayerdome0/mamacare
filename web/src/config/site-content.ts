@@ -189,6 +189,16 @@ export const FAQS = [
   },
 ];
 
+/**
+ * Published clinical reference standards (WHO / national guidance) — not platform
+ * metrics. The live platform counts are read from the database and labelled
+ * separately (`LiveStats`); these are facts about the care model, so they are
+ * safe to show to an anonymous visitor and are never presented as usage numbers.
+ */
+export const PUBLIC_STATS = {
+  note: 'Reference standards are published guidance; usage counts come from the database.',
+} as const;
+
 export const STATS = [
   { value: '8', label: 'recommended antenatal contacts per pregnancy (WHO)' },
   { value: '13', label: 'danger signs screened at every visit' },

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { defaultCountry } from '@/config/geo';
 
 /**
  * Validation schemas shared by the browser and (via the same shapes) the API.
@@ -129,6 +130,11 @@ export const registerSchema = z
     facilityId: z.string().trim().optional(),
     jobTitle: optionalText(60).optional(),
     preferredLanguage: z.string().trim().min(1).default('English'),
+    /**
+     * Country of practice. Zambia is the default for this deployment; any
+     * country can be chosen so the platform stays usable internationally.
+     */
+    country: z.string().trim().min(2).max(3).default(defaultCountry.code),
     acceptTerms: z.literal(true, { error: 'You must accept the terms and privacy notice to continue' }),
     acceptMarketing: z.boolean().optional(),
   })

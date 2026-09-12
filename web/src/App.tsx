@@ -14,6 +14,7 @@ const Emergency = lazy(() => import('@/routes/public/emergency'));
 const Contact = lazy(() => import('@/routes/public/contact'));
 const Faq = lazy(() => import('@/routes/public/faq-page'));
 const Privacy = lazy(() => import('@/routes/public/privacy'));
+const Status = lazy(() => import('@/routes/public/status'));
 
 const SignIn = lazy(() => import('@/routes/auth/sign-in'));
 const Register = lazy(() => import('@/routes/auth/register'));
@@ -62,6 +63,7 @@ export function App() {
               <Route path="/faq" element={<Faq />} />
               <Route path="/privacy" element={<Privacy />} />
               <Route path="/contact" element={<Contact />} />
+              <Route path="/status" element={<Status />} />
 
               <Route
                 path="/signin"
