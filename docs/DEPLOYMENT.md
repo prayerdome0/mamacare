@@ -33,18 +33,25 @@ either dashboard setting works without further changes:
   "installCommand": "cd web && npm ci",
   "buildCommand": "cd web && npm run build",
   "outputDirectory": "web/dist",
-  "rewrites": [{ "source": "/((?!api/).*)", "destination": "/index.html" }]
+  "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
 }
 ```
 
 * `framework: null` stops Vercel from looking for a Next.js app in the repository
   root — there is none, and a build with nothing to serve is what produced Vercel's own
   `404: NOT_FOUND` edge page for **every** URL, including `/`.
-* The rewrite sends every path that is not `/api/*` to `index.html`, which is what
-  makes `/signin`, `/register`, `/app/...` and `/admin/...` work as deep links.
+* The rewrite sends every path to `index.html` once no file matches, which is what makes
+  `/signin`, `/register`, `/app/...` and `/admin/...` work as **deep links**. Keep it in
+  this plain form: a negative lookahead (`/((?!api/).*)`) is accepted by the schema but
+  was not applied by the host, which left `/` working while every deep link still
+  returned the edge's `404: NOT_FOUND` — the exact symptom it was meant to cure.
 * `outputDirectory` (`web/dist`, or `dist` in `web/vercel.json`) must match what
   `npm run build` emits. If it does not, the deployment publishes an empty directory
   and every URL — including `/` — is a 404 again.
+* Because the rewrite is total, `/api/*` on this host answers with the application's
+  HTML. The API client detects a non-JSON reply and reports *"The secure file service is
+  unreachable"* rather than treating it as data, so a static deployment degrades
+  honestly. Point `VITE_API_BASE_URL` at a deployed service to restore those features.
 
 ### Environment variables (Vercel → Project → Settings → Environment Variables)
 
@@ -173,7 +180,8 @@ front-end contains an administrator email address, and no client can write its o
 | --- | --- | --- |
 | Vercel's own `404: NOT_FOUND` on every URL | the deployment contained nothing to serve: no build output, or an `outputDirectory` that does not match the build | deploy with the committed `vercel.json`; check the deployment's build log for the emitted directory |
 | Nothing renders at all — a blank white page, no error text | the JavaScript bundle threw while it was still being evaluated, which happens before any error screen exists | fixed: Firebase Auth is now acquired on first use rather than at module load, so a build without Firebase variables runs in device mode instead of failing to boot |
-| `404` on `/signin` or `/register` but `/` works | missing SPA rewrite | keep the `rewrites` rule above |
+| `404` on `/signin` or `/register` but `/` works | the SPA rewrite is missing or was not applied | use the plain `{ "source": "/(.*)", "destination": "/index.html" }` rule above; a lookahead variant is accepted by the schema but was silently not applied by the host |
+| *"The secure file service is unreachable"* on a static host | expected: `/api/*` has no backend on Vercel | deploy `functions/` and set `VITE_API_BASE_URL`, or accept device-storage uploads |
 | A full-page **"500 — unexpected error"** when opening sign-in, registering or signing in | a render-time exception. Sign-in and registration were the only screens that touched `localStorage` *while rendering*, and a browser that refuses storage (Safari private windows, partitioned iframes, blocked cookies) made that read throw inside render — the error boundary then replaced the page with its 500 screen. All storage access now goes through `src/lib/storage.ts`, which never throws and falls back to in-memory storage | update to this build; the same screens now render and warn that the session will not persist (`web/src/App.smoke.test.tsx` renders both screens with storage refusing to confirm it) |
 | **"Your account could not be set up because the database refused the profile write"** | `firestore.rules` could not be deployed, so the project still enforces an older rule set. The rules language has no loop construct; an earlier revision used `for (let key in keys)` and therefore **never compiled** | `firebase deploy --only firestore:rules` from this repository — the loops are now expressed with `Map.diff().affectedKeys().hasAny([…])`, and `npm test` in `web/` guards against a reintroduction |
 | `auth/configuration-not-found`, *"Email and password sign-in is not enabled…"* | Email/Password provider disabled in Firebase Authentication | enable it in the console |
