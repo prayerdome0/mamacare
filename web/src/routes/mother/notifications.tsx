@@ -1,185 +1,305 @@
-import { useState } from 'react';
-import { Bell, BellOff, CheckCheck } from 'lucide-react';
-import { AppShell } from '@/components/layout/shell';
-import { Card } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Badge, EmptyState, ErrorState, LoadingRows, NoticeState } from '@/components/ui/display';
-import { useAsync, useLiveQuery } from '@/hooks';
-import { useSession } from '@/providers/app-providers';
-import { useToast } from '@/components/ui/toast';
-import {
-  currentPermission,
-  disablePush,
-  enablePush,
-  markAllNotificationsRead,
-  markNotificationRead,
-  pushSupported,
-} from '@/services/notifications/notification-service';
-import { formatDateTime, relativeTime } from '@/lib/utils';
-import type { AppNotification } from '@/types/domain';
-
 /**
- * The mother’s message list. Every reminder is written here first; a push message
- * is only an extra copy on a device she has chosen to allow.
+ * Notifications.
+ *
+ * Everything the app has told her, in one place — reminders, appointment changes,
+ * immunization dates, messages and system notices. Push is optional and this screen
+ * is where it is switched on or off, with an honest explanation of what the browser
+ * will and will not allow.
  */
-export default function MotherNotifications() {
-  const { actor } = useSession();
-  const toast = useToast();
-  const [busy, setBusy] = useState(false);
 
-  const live = useLiveQuery('notifications', {
-    where: actor ? [{ field: 'userId', op: '==', value: actor.uid }] : [{ field: 'userId', op: '==', value: '__none__' }],
-    orderBy: { field: 'sentAt', direction: 'desc' },
-    limit: 60,
-  });
-  const status = useAsync(
-    async () => {
-      const { pushStatus } = await import('@/services/notifications/notification-service');
-      return pushStatus();
-    },
-    {},
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
+import { Bell, BellOff, BellRing, Check, CheckCheck, Trash2 } from 'lucide-react';
+import { useAsync } from '@/hooks';
+import { notificationRepo } from '@/services/repositories';
+import { disablePush, enablePush, pushState, pushSupported, type PushState } from '@/services/push';
+import { useConfirm, useSession } from '@/providers/app-providers';
+import { formatDate, relativeTime } from '@/lib/utils';
+import type { AppNotification, NotificationKind } from '@/types/domain';
+import { AppShell, PageHeader } from '@/components/layout/app-shell';
+import { Button } from '@/components/ui/button';
+import { Card } from '@/components/ui/card';
+import { Badge, EmptyState, ErrorState, LoadingRows } from '@/components/ui/display';
+import { SegmentedControl } from '@/components/ui/tabs';
+import { useToast } from '@/components/ui/toast';
+import { cn } from '@/lib/utils';
+
+const KIND_LABEL: Record<NotificationKind, string> = {
+  appointment: 'Appointment',
+  reminder: 'Reminder',
+  education: 'Education',
+  milestone: 'Milestone',
+  baby: 'Baby',
+  message: 'Message',
+  system: 'System',
+  immunization: 'Immunization',
+};
+
+const KIND_TONE: Record<NotificationKind, 'brand' | 'green' | 'amber' | 'red' | 'blue' | 'purple' | 'neutral'> = {
+  appointment: 'brand',
+  reminder: 'amber',
+  education: 'blue',
+  milestone: 'green',
+  baby: 'purple',
+  message: 'brand',
+  system: 'neutral',
+  immunization: 'green',
+};
+
+export default function NotificationsPage() {
+  const { actor } = useSession();
+  const navigate = useNavigate();
+  const toast = useToast();
+  const confirm = useConfirm();
+  const uid = actor?.uid ?? '';
+
+  const [view, setView] = useState<'all' | 'unread'>('all');
+  const [push, setPush] = useState<PushState | null>(null);
+  const pushStatus = push?.status ?? 'unsupported';
+  const [pushBusy, setPushBusy] = useState(false);
+
+  const { data, loading, error, retryable, run } = useAsync(
+    () => notificationRepo.list(uid, 100),
+    { deps: [uid], immediate: Boolean(uid) },
   );
 
-  const rows = live.data as AppNotification[];
-  const unread = rows.filter((row) => !row.readAt).length;
-  const registered = (status.data?.registered ?? 0) > 0;
+  const rows = useMemo<AppNotification[]>(() => data?.rows ?? [], [data]);
+  const unread = data?.unread ?? 0;
+  const filtered = view === 'unread' ? rows.filter((row) => !row.readAt) : rows;
 
-  const toggle = async () => {
-    setBusy(true);
+  const refreshPush = useCallback(async () => {
+    setPush(await pushState());
+  }, []);
+
+  useEffect(() => {
+    document.title = 'Notifications · Mama Care';
+    if (uid) void refreshPush();
+  }, [uid, refreshPush]);
+
+  const open = async (notification: AppNotification): Promise<void> => {
+    if (!notification.readAt) {
+      await notificationRepo.markRead(notification.id);
+      void run();
+    }
+    if (notification.link) navigate(notification.link);
+  };
+
+  const togglePush = async (): Promise<void> => {
+    setPushBusy(true);
     try {
-      if (registered) {
-        await disablePush();
-        toast.info('Reminders switched off on this phone', 'You will still see them when you open this app.');
+      if (pushStatus === 'granted') {
+        await disablePush(uid);
+        toast.success('Push notifications off', 'Reminders will still appear in the app.');
       } else {
-        await enablePush();
-        toast.success('Reminders on', 'We will send a reminder before your visit and if anything urgent is recorded.');
+        const next = await enablePush(uid);
+        setPush(next);
+        if (next.status === 'granted') {
+          toast.success('Push notifications on', 'This device will receive reminders even when the app is closed.');
+        } else {
+          toast.error('Push could not be enabled', next.reason);
+        }
       }
-      void status.run();
-    } catch (error) {
-      toast.error(error, 'Your phone did not allow reminders');
+      await refreshPush();
+    } catch {
+      toast.error('That did not work', 'Check your browser settings and try again.');
     } finally {
-      setBusy(false);
+      setPushBusy(false);
     }
   };
 
+  const pushCopy: Record<PushState['status'], { title: string; body: string; tone: 'green' | 'amber' | 'red' | 'neutral' }> = {
+    granted: {
+      title: 'Push notifications are on',
+      body: 'This device receives reminders, appointment notices and immunization dates even when the app is closed.',
+      tone: 'green',
+    },
+    denied: {
+      title: 'Push notifications are blocked',
+      body: 'Your browser is refusing notifications for this site. Allow them in your browser settings, then switch push on again. In-app notifications still work.',
+      tone: 'red',
+    },
+    default: {
+      title: 'Push notifications are off',
+      body: 'Switch them on to receive reminders outside the app. Your browser will ask for permission once.',
+      tone: 'amber',
+    },
+    unsupported: {
+      title: 'Push is not available in this browser',
+      body: 'In-app notifications still work, and reminders appear here whenever you open Mama Care.',
+      tone: 'neutral',
+    },
+    unconfigured: {
+      title: 'Push is not configured for this deployment',
+      body: 'In-app notifications still work. A hosted deployment with a VAPID key can deliver reminders outside the app.',
+      tone: 'neutral',
+    },
+    error: {
+      title: 'Push could not be started',
+      body: 'The notification service did not respond. In-app notifications are unaffected — try again when you have a better connection.',
+      tone: 'red',
+    },
+  };
+
+  const copy = pushCopy[pushStatus] ?? pushCopy.default;
+
   return (
-    <AppShell
-      title="Messages"
-      subtitle={unread > 0 ? `${unread} new from your clinic` : 'Nothing new right now'}
-      actions={
-        unread > 0 ? (
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={async () => {
-              try {
-                await markAllNotificationsRead();
-                void live.refresh();
-              } catch (error) {
-                toast.error(error, 'Could not mark your messages as read');
-              }
-            }}
-            icon={<CheckCheck className="size-4" aria-hidden />}
-          >
-            Mark all read
-          </Button>
-        ) : null
-      }
-    >
-      <div className="grid gap-4 xl:grid-cols-[1fr_320px]">
-        <div className="space-y-3">
-          {live.error ? <ErrorState message={live.error} onRetry={() => void live.refresh()} title="Your messages did not load" /> : null}
-          {live.loading && rows.length === 0 ? (
-            <Card>
-              <LoadingRows rows={3} />
-            </Card>
-          ) : rows.length === 0 ? (
-            <Card>
-              <EmptyState
-                icon={<Bell className="size-5" aria-hidden />}
-                title="No messages yet"
-                description="Appointment reminders and notes from your clinic arrive here. Keep this app on your phone so you do not miss a visit."
-              />
-            </Card>
-          ) : (
-            <ul className="space-y-3">
-              {rows.map((row) => (
-                <li key={row.id}>
-                  <Card className={row.readAt ? undefined : 'border-brand-300 bg-brand-50/30'}>
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <p className="text-[0.95rem] font-semibold text-ink-900">{row.title}</p>
-                        <p className="mt-1 text-[0.9rem] leading-relaxed text-ink-700">{row.body}</p>
-                        <div className="mt-2 flex flex-wrap items-center gap-2">
-                          <Badge tone={row.level === 'critical' ? 'red' : row.level === 'warning' ? 'amber' : 'brand'}>{row.kind.replace(/_/g, ' ').toLowerCase()}</Badge>
-                          <span className="caption">{formatDateTime(row.sentAt)}</span>
-                        </div>
-                      </div>
-                      {!row.readAt ? (
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={async () => {
-                            try {
-                              await markNotificationRead(row.id);
-                              void live.refresh();
-                            } catch (error) {
-                              toast.error(error, 'Could not mark as read');
-                            }
-                          }}
-                        >
-                          Mark read
-                        </Button>
-                      ) : null}
-                    </div>
-                    {row.motherId && row.kind === 'NEW_ALERT' ? (
-                      <p className="caption mt-2 border-t border-ink-100 pt-2">
-                        If your clinic asked you to come in, please do so today.
-                      </p>
-                    ) : null}
-                  </Card>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-
-        <div className="space-y-4">
-          <Card title="Reminders on this phone">
-            <div className="flex items-start gap-2.5 rounded-lg border border-ink-200 p-3">
-              <span className="mt-0.5 text-ink-400" aria-hidden>
-                {registered ? <Bell className="size-4" /> : <BellOff className="size-4" />}
-              </span>
-              <div className="min-w-0">
-                <p className="text-[0.86rem] font-semibold text-ink-900">{registered ? 'On for this phone' : 'Off for this phone'}</p>
-                <p className="caption mt-0.5">
-                  {status.loading
-                    ? 'Checking this device…'
-                    : `Permission: ${
-                        { granted: 'allowed', denied: 'blocked — change it in your phone settings', default: 'not asked yet', unsupported: 'not supported by this browser', 'not-configured': 'not set up by your clinic' }[
-                          status.data?.state ?? currentPermission()
-                        ]
-                      } · last message ${rows[0] ? relativeTime(rows[0].sentAt) : 'none yet'}`}
-                </p>
-              </div>
-            </div>
-            <Button className="mt-3 w-full" loading={busy} disabled={!pushSupported()} onClick={() => void toggle()}>
-              {registered ? 'Turn reminders off' : 'Allow reminders on this phone'}
-            </Button>
-            {!pushSupported() ? <p className="caption mt-2">This browser cannot receive reminders. Your messages still appear here.</p> : null}
-            {status.error ? (
-              <div className="mt-3">
-                <ErrorState message={status.error} onRetry={() => void status.run()} compact />
-              </div>
+    <AppShell>
+      <PageHeader
+        title="Notifications"
+        description="Reminders, appointment notices, immunization dates, messages and system announcements — newest first."
+        badge={unread > 0 ? <Badge tone="red">{unread} unread</Badge> : <Badge tone="green">All read</Badge>}
+        actions={
+          <>
+            {unread > 0 ? (
+              <Button
+                variant="secondary"
+                size="sm"
+                icon={<CheckCheck className="size-4" aria-hidden />}
+                onClick={async () => {
+                  await notificationRepo.markAllRead(uid);
+                  toast.success('All marked as read');
+                  void run();
+                }}
+              >
+                Mark all read
+              </Button>
             ) : null}
-          </Card>
+            <Button
+              variant={pushStatus === 'granted' ? 'secondary' : 'primary'}
+              size="sm"
+              loading={pushBusy}
+              disabled={!pushSupported() && pushStatus !== 'granted'}
+              onClick={() => void togglePush()}
+              icon={pushStatus === 'granted' ? <BellOff className="size-4" aria-hidden /> : <BellRing className="size-4" aria-hidden />}
+            >
+              {pushStatus === 'granted' ? 'Turn push off' : 'Turn push on'}
+            </Button>
+          </>
+        }
+      />
 
-          <NoticeState tone="info" title="A note about privacy" compact>
-            Reminders go to this phone with a short title, never with your measurements or results in the notification. Open this app to read the whole
-            message. If someone else uses your phone, turn reminders off.
-          </NoticeState>
+      <Card className="card-pad mb-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="card-title">{copy.title}</h2>
+              <Badge tone={copy.tone}>{pushStatus}</Badge>
+            </div>
+            <p className="mt-1 text-sm text-ink-600">{copy.body}</p>
+            {push && 'reason' in push && push.reason !== copy.body ? <p className="mt-1 text-xs text-ink-500">{push.reason}</p> : null}
+          </div>
+          <Link to="/app/settings" className="btn btn-ghost btn-sm">
+            What I get notified about
+          </Link>
         </div>
-      </div>
+      </Card>
+
+      <SegmentedControl
+        value={view}
+        onChange={setView}
+        ariaLabel="Notification filter"
+        options={[
+          { value: 'all', label: 'All', count: rows.length },
+          { value: 'unread', label: 'Unread', count: unread },
+        ]}
+      />
+
+      {error ? <ErrorState className="mt-4" title="Notifications could not be loaded" message={error} onRetry={retryable ? run : undefined} /> : null}
+      {loading ? <LoadingRows className="mt-4" rows={4} /> : null}
+
+      {!loading && !error && filtered.length === 0 ? (
+        <EmptyState
+          className="mt-6"
+          icon={<Bell className="size-6" aria-hidden />}
+          title={view === 'unread' ? 'Nothing unread' : 'No notifications yet'}
+          description={
+            view === 'unread'
+              ? 'You are all caught up. New reminders and appointment notices will appear here.'
+              : 'Once you add a reminder or an appointment, Mama Care will start keeping you informed here.'
+          }
+          action={
+            view === 'unread' ? (
+              <Button variant="secondary" size="sm" onClick={() => setView('all')}>
+                Show everything
+              </Button>
+            ) : (
+              <Link to="/app/reminders" className="btn btn-primary btn-sm">
+                Add a reminder
+              </Link>
+            )
+          }
+        />
+      ) : null}
+
+      <ul className="mt-4 space-y-2">
+        {filtered.map((notification) => (
+          <li key={notification.id}>
+            <Card className={cn('card-pad transition-colors', !notification.readAt && 'border-brand-300 bg-brand-50/30')}>
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <button type="button" className="min-w-0 flex-1 text-left" onClick={() => void open(notification)}>
+                  <span className="flex flex-wrap items-center gap-2">
+                    <Badge tone={KIND_TONE[notification.kind] ?? 'neutral'}>{KIND_LABEL[notification.kind] ?? notification.kind}</Badge>
+                    {!notification.readAt ? <span className="size-2 rounded-full bg-brand-600" aria-label="Unread" /> : null}
+                    {notification.deliveredByPush ? <Badge tone="neutral">Pushed</Badge> : null}
+                  </span>
+                  <span className="mt-1.5 block text-[0.95rem] font-semibold text-ink-900">{notification.title}</span>
+                  <span className="mt-0.5 block text-sm text-ink-600">{notification.body}</span>
+                  <span className="mt-1 block text-xs text-ink-500">
+                    {formatDate(notification.createdAt, 'long')} · {relativeTime(notification.createdAt)}
+                    {notification.link ? ' · tap to open' : ''}
+                  </span>
+                </button>
+                <div className="actions-wrap">
+                  {!notification.readAt ? (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      aria-label="Mark as read"
+                      onClick={async () => {
+                        await notificationRepo.markRead(notification.id);
+                        void run();
+                      }}
+                    >
+                      <Check className="size-4" aria-hidden />
+                    </Button>
+                  ) : null}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    aria-label="Delete notification"
+                    onClick={async () => {
+                      const ok = await confirm({
+                        title: 'Delete this notification',
+                        message: notification.title,
+                        confirmLabel: 'Delete',
+                        tone: 'danger',
+                      });
+                      if (!ok) return;
+                      await notificationRepo.remove(notification.id);
+                      void run();
+                    }}
+                  >
+                    <Trash2 className="size-4" aria-hidden />
+                  </Button>
+                </div>
+              </div>
+            </Card>
+          </li>
+        ))}
+      </ul>
+
+      <Card className="card-pad mt-6 border-ink-200 bg-ink-50">
+        <h3 className="card-title">Quiet hours</h3>
+        <p className="mt-1 text-sm text-ink-600">
+          Push is silenced overnight so a reminder does not wake you or the baby. Change the hours, or switch individual
+          categories off, in Settings.
+        </p>
+        <div className="mt-3">
+          <Link to="/app/settings" className="btn btn-secondary btn-sm">
+            Notification settings
+          </Link>
+        </div>
+      </Card>
     </AppShell>
   );
 }

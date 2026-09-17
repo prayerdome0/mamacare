@@ -1,45 +1,55 @@
-import { Link } from 'react-router-dom';
-import { cn } from '@/lib/utils';
-
 /**
- * The MAMA CARE wordmark. Drawn as inline SVG so it stays crisp, inherits the
- * brand colour, and never depends on an image request (important for low-bandwidth
- * clinics). The Cloudinary-hosted `branding/logo` asset is used where an exported
- * image is required (PDFs, favicons).
+ * Brand mark.
+ *
+ * A heart held inside a protective circle — "care for mama, care for baby". The
+ * mark is inline SVG so it stays sharp at 16px in a browser tab and at 512px in a
+ * PWA install prompt, and it inherits `currentColor` so it works on dark and light
+ * surfaces without a second asset.
  */
-export function Wordmark({
-  size = 'md',
-  tone = 'brand',
-  compact = false,
-  href = '/',
-  className,
-}: {
-  size?: 'sm' | 'md' | 'lg';
-  tone?: 'brand' | 'light' | 'dark';
-  compact?: boolean;
-  href?: string;
-  className?: string;
-}) {
-  const dimension = { sm: 'size-6', md: 'size-8', lg: 'size-10' }[size];
-  const text = { sm: 'text-[0.95rem]', md: 'text-[1.08rem]', lg: 'text-2xl' }[size];
-  const mark = tone === 'light' ? '#ffffff' : '#0f766e';
-  const word = tone === 'light' ? '#ffffff' : '#0f172a';
 
+import { cn } from '@/lib/utils';
+import { app } from '@/config/env';
+
+export function Wordmark({
+  className,
+  compact = false,
+  tone = 'dark',
+}: {
+  className?: string;
+  compact?: boolean;
+  tone?: 'dark' | 'light';
+}) {
   return (
-    <Link to={href} className={cn('inline-flex items-center gap-2.5', className)} aria-label="MAMA CARE home">
-      <svg viewBox="0 0 40 40" className={cn(dimension, 'shrink-0')} role="img" aria-hidden focusable="false">
-        <rect width="40" height="40" rx="12" fill={tone === 'light' ? 'rgba(255,255,255,0.14)' : '#ccfbf1'} />
-        <path
-          d="M20 31.5c-5.4-3.4-9-7.3-9-11.7a5.6 5.6 0 0 1 9-4.4 5.6 5.6 0 0 1 9 4.4c0 4.4-3.6 8.3-9 11.7Z"
-          fill={mark}
-        />
-        <circle cx="20" cy="18.6" r="2.6" fill={tone === 'light' ? '#0f766e' : '#ffffff'} />
-      </svg>
+    <span className={cn('inline-flex items-center gap-2.5', className)}>
+      <Mark className={cn('size-9 shrink-0', tone === 'light' ? 'text-white' : 'text-brand-700')} />
       {!compact ? (
-        <span className={cn('font-bold tracking-[-0.02em] whitespace-nowrap', text)} style={{ color: word }}>
-          MAMA <span style={{ color: mark }}>CARE</span>
+        <span className="flex flex-col leading-none">
+          <span
+            className={cn(
+              'text-[1.05rem] font-bold tracking-[-0.02em]',
+              tone === 'light' ? 'text-white' : 'text-ink-900',
+            )}
+          >
+            {app.name}
+          </span>
+          <span className={cn('mt-1 text-[0.66rem] font-medium tracking-[0.14em] uppercase', tone === 'light' ? 'text-white/70' : 'text-brand-700')}>
+            {app.tagline}
+          </span>
         </span>
       ) : null}
-    </Link>
+    </span>
+  );
+}
+
+export function Mark({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 40 40" fill="none" aria-hidden className={className}>
+      <circle cx="20" cy="20" r="18.5" stroke="currentColor" strokeWidth="2.4" opacity="0.35" />
+      <path
+        d="M20 29.5c-4.6-3-8-6.1-8-10a4.6 4.6 0 0 1 8-3 4.6 4.6 0 0 1 8 3c0 3.9-3.4 7-8 10Z"
+        fill="currentColor"
+      />
+      <circle cx="20" cy="17.4" r="1.7" fill="#fff" opacity="0.85" />
+    </svg>
   );
 }

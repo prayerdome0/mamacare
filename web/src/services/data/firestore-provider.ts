@@ -5,6 +5,10 @@
  * need a compound index is post-filtered. Authorisation is *not* implemented
  * here: `firestore.rules` decides, and the provider surfaces a permission error
  * as a friendly AppError instead of falling back to a wider read.
+ *
+ * If the deployed rules are missing or stricter than this build expects, reads
+ * fail with a message naming the collection — the app never silently returns an
+ * empty screen and lets a mother think she has no appointments.
  */
 
 import {
@@ -192,9 +196,8 @@ export class FirestoreProvider implements DataProvider {
   }
 
   /**
-   * Canonical patient ids come from a server-side counter so two devices can
-   * never mint the same one. Falls back to the API allocation route when the
-   * client is not allowed to touch counters (the hardened configuration).
+   * Atomic counter. Used sparingly — Mama Care has no canonical patient-number
+   * requirement — but available for facility-generated reference codes.
    */
   async nextSequence(name: string, step = 1): Promise<number> {
     try {
@@ -207,7 +210,7 @@ export class FirestoreProvider implements DataProvider {
       });
     } catch (error) {
       throw new AppError(
-        'Unable to allocate a patient ID. Ask your administrator to deploy the counters rule, then retry.',
+        'Unable to allocate a reference number. Ask your administrator to deploy the counters rule, then retry.',
         error instanceof AppError ? error.code : 'STORAGE_UNAVAILABLE',
         { retryable: true },
       );
@@ -287,7 +290,7 @@ function postFilterNeeded(spec: QuerySpec): boolean {
 function mapReadError(error: unknown, label: string): AppError {
   const code = (error as { code?: string; message?: string }).code ?? '';
   if (code === 'permission-denied') {
-    return new AppError(`You do not have access to ${label} for your facility.`, 'FORBIDDEN');
+    return new AppError(`You do not have access to ${label}.`, 'FORBIDDEN');
   }
   if (code === 'unavailable' || code === 'deadline-exceeded') {
     return new AppError(`Unable to load ${label}. Check your connection and retry.`, 'NETWORK', {
@@ -307,7 +310,7 @@ function mapWriteError(error: unknown, label: string): AppError {
   const code = (error as { code?: string }).code ?? '';
   if (code === 'permission-denied') {
     return new AppError(
-      `Your role does not allow changes to ${label}. Ask a supervisor or administrator if this is blocking care.`,
+      `Your role does not allow changes to ${label}. If this is blocking your care, ask your healthcare provider or an administrator.`,
       'FORBIDDEN',
     );
   }
@@ -324,22 +327,27 @@ function mapWriteError(error: unknown, label: string): AppError {
 
 const HUMAN: Partial<Record<CollectionName, string>> = {
   users: 'user accounts',
-  facilities: 'facilities',
-  mothers: 'mother records',
   pregnancies: 'pregnancy records',
-  anc_visits: 'ANC visits',
+  babies: 'baby profiles',
   appointments: 'appointments',
-  alerts: 'alerts',
-  referrals: 'referrals',
-  reports: 'reports',
-  documents: 'documents',
+  reminders: 'reminders',
+  observations: 'health observations',
+  immunizations: 'immunization records',
+  journal: 'journal entries',
+  articles: 'health education',
+  facilities: 'facilities',
+  providers: 'provider profiles',
+  messages: 'messages',
   notifications: 'notifications',
-  audit_logs: 'audit history',
-  education: 'health education',
-  alert_rules: 'clinical rules',
   devices: 'devices',
-  facility_assignments: 'staffing',
+  announcements: 'announcements',
+  supporters: 'family sharing',
+  care_links: 'care sharing',
+  feedback: 'feedback',
+  reports: 'content reports',
+  audit_logs: 'audit history',
   settings: 'system settings',
+  documents: 'documents',
 };
 
 const human = (name: CollectionName): string => HUMAN[name] ?? name.replace(/_/g, ' ');

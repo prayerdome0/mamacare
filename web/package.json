@@ -10,15 +10,11 @@
     "preview": "vite preview --host 0.0.0.0",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
-    "lint": "eslint .",
     "icons": "node scripts/generate-icons.mjs"
   },
   "dependencies": {
     "clsx": "^2.1.1",
-    "date-fns": "^4.1.0",
     "firebase": "^12.19.0",
-    "jspdf": "^3.0.1",
-    "jspdf-autotable": "^5.0.2",
     "lucide-react": "^0.545.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",

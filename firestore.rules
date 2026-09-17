@@ -1,33 +1,40 @@
 rules_version = '2';
 
 /**
- * MAMA CARE — Firestore security rules.
+ * Mama Care — Firestore security rules.
  *
- * These rules are the enforcement half of `web/src/services/policy/policy.ts`.
- * The client module decides what to render; this file decides what the database
- * will actually return or accept. They implement the same matrix on purpose, so
- * behaviour is identical whether a request comes from the browser, a stolen
- * browser, or a script using an ID token.
+ * These rules are the enforcement layer. The TypeScript policy module in
+ * `web/src/services/policy/policy.ts` mirrors them so the device-only build behaves
+ * identically, but only this file stands between a crafted request and somebody
+ * else's pregnancy record. Every rule below has a counterpart there; if you change
+ * one, change the other.
  *
- * Design notes
- * ────────────
- * • Roles come from custom claims (`role`, `facilityId`, `accountStatus`,
- *   `motherId`). Claims are only ever written by the API service with the Admin
- *   SDK, so a client cannot grant itself anything.
- * • Privileged writes (role changes, approvals, media deletion, SMS) are not
- *   available from the client at all — there is no rule that allows them; they go
- *   through the API service.
- * • Clinical rows are facility-scoped. A mother sees only rows whose `motherId`
- *   is her own record.
- * • `audit_logs` is append-only; `settings`/`alert_rules` are admin-managed.
+ * Principles, in order of importance:
  *
- * Deploy with: firebase deploy --only firestore
+ *  1. A mother owns her health data. She can always read and write it, and she can
+ *     always delete it. Nothing else in this file overrides that.
+ *  2. A clinician reaches a patient's records only through an active care link, and
+ *     never through the journal, personal documents, notifications or devices.
+ *  3. A supporter sees only the categories the mother switched on for them.
+ *  4. Roles come from the custom claim when it exists and from the profile document
+ *     otherwise, so a deployment works before claims are wired up — but nobody can
+ *     promote themselves, because `role` is not writable by its owner.
+ *  5. Public content (published articles, active facilities, announcements, the
+ *     global settings document) is readable by anyone, because the public site must
+ *     work for a woman who has not registered and may never register.
+ *
+ * Two document ids are deterministic on purpose, so a rule can answer "is this
+ * clinician linked to this patient?" with a single `exists()` rather than a query it
+ * cannot run:
+ *
+ *   care_links/{motherUserId}__{providerUserId}
+ *   supporters/{motherUserId}__{supporterEmail}
  */
 
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    /* ── helpers ─────────────────────────────────────────────────────── */
+    /* ── Identity helpers ─────────────────────────────────────────────── */
 
     function signedIn() {
       return request.auth != null;
@@ -37,397 +44,466 @@ service cloud.firestore {
       return request.auth.uid;
     }
 
-    function claim(name) {
-      return signedIn() && name in request.auth.token ? request.auth.token[name] : null;
+    function email() {
+      return signedIn() && request.auth.token.email != null ? request.auth.token.email : '';
     }
 
+    function userDoc(id) {
+      return /databases/$(database)/documents/users/$(id);
+    }
+
+    function profileExists(id) {
+      return exists(userDoc(id));
+    }
+
+    /** The role on the token if an administrator set the claim, else the profile. */
     function role() {
-      return claim('role');
-    }
-
-    function facilityId() {
-      return claim('facilityId');
-    }
-
-    function motherId() {
-      return claim('motherId');
+      if (!signedIn()) {
+        return 'GUEST';
+      }
+      if (request.auth.token.role != null) {
+        return string(request.auth.token.role);
+      }
+      return profileExists(uid()) ? string(get(userDoc(uid())).data.role) : 'GUEST';
     }
 
     function isAdmin() {
       return role() == 'ADMIN';
     }
 
-    function isSupervisor() {
-      return role() == 'ADMIN' || role() == 'FACILITY_SUPERVISOR';
+    function isFacilityAdmin() {
+      return role() == 'FACILITY_ADMIN';
     }
 
-    function isStaff() {
-      return signedIn() && role() != 'MOTHER';
-    }
-
-    function isClinicalWriter() {
-      return isAdmin() || isSupervisor() || role() == 'MIDWIFE' || role() == 'NURSE';
-    }
-
-    function isChw() {
-      return role() == 'COMMUNITY_HEALTH_WORKER';
+    function isProvider() {
+      return role() == 'PROVIDER';
     }
 
     function isMother() {
       return role() == 'MOTHER';
     }
 
-    /** Unapproved accounts may read their own profile and nothing clinical. */
-    function pending() {
-      return claim('accountStatus') == 'PENDING_APPROVAL';
+    function isSupporter() {
+      return role() == 'SUPPORTER';
     }
 
-    function approved() {
-      return signedIn() && !pending();
+    function isStaff() {
+      return isAdmin() || isFacilityAdmin() || isProvider();
     }
 
-    /** Any facility field on a document matching the caller's facility claim. */
-    function sameFacility(data) {
-      let fid = facilityId();
-      return fid != null && (
-        data.get(['facilityId']) == fid ||
-        data.get(['registrationFacilityId']) == fid ||
-        data.get(['careFacilityId']) == fid ||
-        data.get(['originFacilityId']) == fid ||
-        data.get(['receivingFacilityId']) == fid
-      );
+    /** Suspended and closed accounts keep their records but cannot write. */
+    function accountInGoodStanding() {
+      return signedIn()
+        && profileExists(uid())
+        && get(userDoc(uid())).data.status in ['ACTIVE', 'PENDING_APPROVAL'];
     }
 
-    function facilityFieldEquals(data, field) {
-      return facilityId() != null && data.get([field]) == facilityId();
+    function myFacilityId() {
+      return signedIn() && profileExists(uid()) && get(userDoc(uid())).data.facilityId != null
+        ? get(userDoc(uid())).data.facilityId
+        : '';
     }
 
-    function ownedByMother(data) {
-      let mid = motherId();
-      return mid != null && (data.get(['motherId']) == mid || resource.id == mid);
+    /* ── Care-sharing helpers ─────────────────────────────────────────── */
+
+    function careLinkDoc(motherId) {
+      return /databases/$(database)/documents/care_links/$(motherId + '__' + uid());
     }
 
-    /**
-     * True when a patch moves a row between facilities.
-     *
-     * The rules language has no loop construct — an earlier revision of this file
-     * used `for (let key in keys)`, which the compiler rejects, so the file could
-     * not be deployed at all. `Map.diff(...).affectedKeys()` is the supported way
-     * to ask exactly the same question, and it needs no iteration.
-     */
-    function changesFacilityKeys(before, after) {
-      return after.diff(before).affectedKeys().hasAny([
-        'facilityId',
-        'registrationFacilityId',
-        'careFacilityId',
-        'originFacilityId',
-        'receivingFacilityId'
-      ]);
+    /** True when the signed-in clinician has an ACTIVE link to this patient. */
+    function linkedClinician(motherId) {
+      return signedIn()
+        && (isProvider() || isFacilityAdmin())
+        && exists(careLinkDoc(motherId))
+        && get(careLinkDoc(motherId)).data.status == 'active';
     }
 
-    /**
-     * True when a patch touches a field only an administrator or the API service
-     * may change. Compared against the *changed* keys, not the whole document:
-     * every stored user row contains `role`, so testing the document's keys would
-     * have blocked a person from editing their own name or phone number.
-     */
-    function patchTouchesPrivilege(before, after) {
-      return after.diff(before).affectedKeys().hasAny([
-        'role',
-        'status',
-        'privilegeVersion',
-        'accountKind',
-        'motherId',
-        'facilityId',
-        'requestedRole'
-      ]);
+    function supporterLinkDoc(motherId) {
+      return /databases/$(database)/documents/supporters/$(motherId + '__' + email().lower());
     }
 
-    /** Fields a mother may never alter on her own record. */
-    function patchTouchesClinicalData(before, after) {
-      return after.diff(before).affectedKeys().hasAny([
-        'riskLevel',
-        'currentPregnancyId',
-        'gestationalSnapshot',
-        'eddSnapshot',
-        'consent',
-        'assignedChwUserId',
-        'registrationFacilityId',
-        'status'
-      ]);
+    /** True when this account is the mother's active supporter. */
+    function linkedSupporter(motherId) {
+      return signedIn()
+        && email() != ''
+        && exists(supporterLinkDoc(motherId))
+        && get(supporterLinkDoc(motherId)).data.status == 'active';
     }
 
-    function noDelete() {
-      return request.operation != 'delete';
+    /** The mother this supporter account helps, from their own profile. */
+    function supportsUserId() {
+      return signedIn() && profileExists(uid()) && get(userDoc(uid())).data.supportsUserId != null
+        ? string(get(userDoc(uid())).data.supportsUserId)
+        : '';
     }
 
-    /* ── facilities (directory: public read, admin write) ────────────── */
-
-    match /facilities/{facilityId} {
-      allow read: if true;
-      allow create, delete: if isAdmin();
-      allow update: if isAdmin();
+    function isMyPatient(ownerId) {
+      return signedIn() && supportsUserId() == ownerId && linkedSupporter(ownerId);
     }
 
-    /* ── users (profiles) ───────────────────────────────────────────── */
+    function unchanged(field) {
+      return !(field in request.resource.data) || request.resource.data[field] == resource.data[field];
+    }
+
+    /** The owner, an administrator, or a clinician with an active care link. */
+    function ownerCanRead(ownerId) {
+      return signedIn() && (ownerId == uid() || isAdmin() || linkedClinician(ownerId));
+    }
+
+    /** A supporter reading the baby record of the mother they help. */
+    function supporterOf(ownerId) {
+      return signedIn() && ownerId == supportsUserId() && linkedSupporter(ownerId);
+    }
+
+    /** Category switches the mother set for this supporter. */
+    function supporterCanSeeAppointments(motherId) {
+      return linkedSupporter(motherId) && get(supporterLinkDoc(motherId)).data.permissions.appointments == true;
+    }
+
+    function supporterCanSeeReminders(motherId) {
+      return linkedSupporter(motherId) && get(supporterLinkDoc(motherId)).data.permissions.reminders == true;
+    }
+
+    /* ── Accounts ─────────────────────────────────────────────────────── */
 
     match /users/{userId} {
-      function selfRead() {
-        return signedIn() && userId == uid();
-      }
+      // Your own account, an administrator, the clinician you linked, your
+      // supporter, and a facility administrator who shares your facility.
+      allow get: if isAdmin()
+        || (signedIn() && userId == uid())
+        || linkedClinician(userId)
+        || isMyPatient(userId)
+        || (isFacilityAdmin() && profileExists(userId) && get(userDoc(userId)).data.facilityId == myFacilityId())
+        // A mother may see the supporter account she invited.
+        || (isMother() && profileExists(userId)
+              && get(userDoc(userId)).data.role == 'SUPPORTER'
+              && get(userDoc(userId)).data.supportsUserId == uid());
 
-      allow get: if selfRead()
-        || isAdmin()
-        || (isStaff() && approved() && resource.data.accountKind == 'HEALTH_WORKER');
+      // Listing accounts is an administrative function; everybody else reads by id.
+      allow list: if isAdmin() || isFacilityAdmin();
 
-      allow list: if isAdmin();
-
-      // Sign-up writes exactly one document: its own uid, with a non-privileged
-      // role and a status the client is allowed to declare.
-      //
-      // `privilegeVersion` is server-managed. A client may omit it (the current
-      // client does) or send the initial value `1`; any other value is refused,
-      // so this is not a way to escape the revocation check in the API service.
+      // Self-service registration. Administrator and facility roles are granted by
+      // an existing administrator, never chosen at sign-up.
       allow create: if signedIn()
         && userId == uid()
-        && request.resource.data.role in ['MIDWIFE', 'NURSE', 'COMMUNITY_HEALTH_WORKER', 'FACILITY_SUPERVISOR', 'MOTHER']
-        && request.resource.data.status in ['PENDING_APPROVAL', 'ACTIVE']
-        && (!request.resource.data.keys().hasAny(['privilegeVersion'])
-            || request.resource.data.privilegeVersion == 1);
+        && request.resource.data.uid == userId
+        && request.resource.data.role in ['MOTHER', 'SUPPORTER', 'PROVIDER'];
 
-      // A person may edit their own contact details — never their privileges.
-      // Role, status, facility, account kind and motherId are all admin/API only.
+      // Owners manage their own profile but cannot touch the fields that carry
+      // privilege. Administrators manage everything; facility administrators manage
+      // providers at their own facility.
       allow update: if isAdmin()
-        || (signedIn() && userId == uid() && !patchTouchesPrivilege(resource.data, request.resource.data));
+        || (signedIn() && accountInGoodStanding() && userId == uid()
+              && unchanged('role')
+              && unchanged('status')
+              && unchanged('privilegeVersion')
+              && unchanged('uid')
+              && unchanged('createdAt')
+              && unchanged('providerId')
+              && unchanged('facilityId'))
+        || (isFacilityAdmin() && resource.data.facilityId == myFacilityId() && resource.data.role == 'PROVIDER');
 
-      // Accounts are deactivated, never deleted, so the audit trail resolves.
-      allow delete: if false;
+      // Deleting your own account is a right, not a favour.
+      allow delete: if isAdmin() || (signedIn() && userId == uid());
     }
 
-    /* ── clinical records ───────────────────────────────────────────── */
+    /* ── Health records owned by one person ───────────────────────────── */
 
-    match /mothers/{motherId} {
-      allow get: if (isStaff() && approved() && sameFacility(resource.data)) || isAdmin() || ownedByMother(resource.data);
-      allow list: if (isStaff() && approved()) || isAdmin();
+    // Pregnancy, babies, reminders, appointments, observations, immunizations.
+    // A linked clinician may read and add to these; a supporter only what was shared.
+    match /pregnancies/{recordId} {
+      allow read: if isAdmin() || ownerCanRead(resource.data.userId);
+      allow create: if isAdmin() || (accountInGoodStanding() && request.resource.data.userId == uid());
+      allow update, delete: if isAdmin() || (accountInGoodStanding() && resource.data.userId == uid());
+    }
 
-      // Registration and community follow-up create records; mothers do not.
-      allow create: if (isClinicalWriter() && request.resource.data.get(['registrationFacilityId']) == facilityId())
-        || (isChw() && approved() && request.resource.data.get(['registrationFacilityId']) == facilityId())
-        || isAdmin();
+    match /babies/{recordId} {
+      allow read: if isAdmin() || ownerCanRead(resource.data.userId) || supporterOf(resource.data.userId);
+      allow create: if isAdmin() || (accountInGoodStanding() && request.resource.data.userId == uid());
+      allow update, delete: if isAdmin() || (accountInGoodStanding() && resource.data.userId == uid());
+    }
 
+    match /reminders/{recordId} {
+      allow read: if isAdmin()
+        || ownerCanRead(resource.data.userId)
+        || (resource.data.userId == supportsUserId() && supporterCanSeeReminders(resource.data.userId));
+      allow create: if isAdmin() || (accountInGoodStanding() && request.resource.data.userId == uid());
+      allow update, delete: if isAdmin() || (accountInGoodStanding() && resource.data.userId == uid());
+    }
+
+    match /appointments/{recordId} {
+      allow read: if isAdmin()
+        || ownerCanRead(resource.data.userId)
+        || (resource.data.userId == supportsUserId() && supporterCanSeeAppointments(resource.data.userId));
+      allow create: if isAdmin()
+        || (accountInGoodStanding() && request.resource.data.userId == uid())
+        // A clinician may book for a linked patient.
+        || (accountInGoodStanding() && linkedClinician(request.resource.data.userId));
       allow update: if isAdmin()
-        || (isClinicalWriter() && approved() && sameFacility(resource.data) && !changesFacilityKeys(resource.data, request.resource.data))
-        || (isChw() && approved() && sameFacility(resource.data) && !patchTouchesClinicalData(resource.data, request.resource.data) && !changesFacilityKeys(resource.data, request.resource.data))
-        || (ownedByMother(resource.data) && !patchTouchesClinicalData(resource.data, request.resource.data) && !changesFacilityKeys(resource.data, request.resource.data));
-
-      allow delete: if false;
+        || (accountInGoodStanding() && resource.data.userId == uid())
+        || (accountInGoodStanding() && linkedClinician(resource.data.userId));
+      allow delete: if isAdmin() || (accountInGoodStanding() && resource.data.userId == uid());
     }
 
-    match /pregnancies/{pregnancyId} {
-      allow read: if (isStaff() && approved() && sameFacility(resource.data)) || isAdmin() || ownedByMother(resource.data);
-      allow create, update: if isClinicalWriter() && approved() && sameFacility(request.resource.data)
-        || isAdmin();
-      allow delete: if false;
-    }
-
-    match /anc_visits/{visitId} {
-      allow read: if (isStaff() && approved() && sameFacility(resource.data)) || isAdmin() || ownedByMother(resource.data);
-      // Visits are entered at the facility where the mother was seen.
-      allow create: if (isClinicalWriter() && approved() && facilityFieldEquals(request.resource.data, 'facilityId')) || isAdmin();
-      // Amendments stay inside the facility; only supervisors/admin may close one.
+    match /observations/{recordId} {
+      allow read: if isAdmin() || ownerCanRead(resource.data.userId);
+      allow create: if isAdmin()
+        || (accountInGoodStanding() && request.resource.data.userId == uid())
+        || (accountInGoodStanding() && linkedClinician(request.resource.data.userId));
       allow update: if isAdmin()
-        || (isClinicalWriter() && approved() && sameFacility(resource.data) && !changesFacilityKeys(resource.data, request.resource.data));
-      allow delete: if false;
+        || (accountInGoodStanding() && resource.data.userId == uid())
+        || (accountInGoodStanding() && linkedClinician(resource.data.userId) && resource.data.recordedBy == 'provider');
+      allow delete: if isAdmin() || (accountInGoodStanding() && resource.data.userId == uid());
     }
 
-    match /appointments/{appointmentId} {
-      allow read: if (isStaff() && approved() && sameFacility(resource.data)) || isAdmin() || ownedByMother(resource.data);
-      allow create: if (isStaff() && approved() && facilityFieldEquals(request.resource.data, 'facilityId')) || isAdmin();
+    match /immunizations/{recordId} {
+      allow read: if isAdmin() || ownerCanRead(resource.data.userId) || supporterOf(resource.data.userId);
+      allow create: if isAdmin() || (accountInGoodStanding() && request.resource.data.userId == uid());
+      // Only the mother records that a dose was given — it is her child's card.
+      allow update, delete: if isAdmin() || (accountInGoodStanding() && resource.data.userId == uid());
+    }
+
+    // The journal is private to the person who wrote it. No clinician, no supporter,
+    // no facility administrator — only an administrator, and only where the law
+    // requires it.
+    match /journal/{recordId} {
+      allow read: if isAdmin() || (signedIn() && resource.data.userId == uid());
+      allow create: if accountInGoodStanding() && request.resource.data.userId == uid();
+      allow update, delete: if isAdmin() || (accountInGoodStanding() && resource.data.userId == uid());
+    }
+
+    // Personal health documents: scans, lab results, prescriptions, birth records.
+    // Deliberately narrower than the rest — a clinician who needs a scan asks for it
+    // in person rather than reading it from storage.
+    match /documents/{recordId} {
+      allow read: if isAdmin() || (signedIn() && resource.data.userId == uid());
+      allow create: if accountInGoodStanding() && request.resource.data.userId == uid();
+      allow update, delete: if isAdmin() || (accountInGoodStanding() && resource.data.userId == uid());
+    }
+
+    match /notifications/{recordId} {
+      allow read: if isAdmin() || (signedIn() && resource.data.userId == uid());
+      allow list: if isAdmin() || (signedIn() && request.query.limit <= 200);
+      // The system, an administrator broadcasting, or a clinician notifying a
+      // linked patient.
+      allow create: if isAdmin()
+        || (accountInGoodStanding() && linkedClinician(request.resource.data.userId))
+        || (accountInGoodStanding() && request.resource.data.userId == uid());
+      // Read state only. A notification cannot be rewritten after delivery.
       allow update: if isAdmin()
-        || (isStaff() && approved() && sameFacility(resource.data) && !changesFacilityKeys(resource.data, request.resource.data))
-        || (ownedByMother(resource.data) && request.resource.data.status in ['CANCELLED', 'CONFIRMED'] && !changesFacilityKeys(resource.data, request.resource.data));
-      allow delete: if false;
+        || (signedIn() && resource.data.userId == uid() && unchanged('title') && unchanged('body') && unchanged('kind') && unchanged('link'));
+      allow delete: if isAdmin() || (signedIn() && resource.data.userId == uid());
     }
 
-    match /alerts/{alertId} {
-      allow read: if (isStaff() && approved() && sameFacility(resource.data)) || isAdmin() || ownedByMother(resource.data);
-      allow create: if isClinicalWriter() && approved() && facilityFieldEquals(request.resource.data, 'facilityId');
-      // Resolving an alert requires the person to be at the alert's facility.
-      allow update: if isAdmin()
-        || (isStaff() && approved() && sameFacility(resource.data) && !changesFacilityKeys(resource.data, request.resource.data));
-      allow delete: if false;
+    match /devices/{recordId} {
+      allow read: if isAdmin() || (signedIn() && resource.data.userId == uid());
+      allow create, update: if accountInGoodStanding() && request.resource.data.userId == uid();
+      allow delete: if isAdmin() || (signedIn() && resource.data.userId == uid());
     }
 
-    match /referrals/{referralId} {
-      // Both ends of a handover must be able to see the referral.
-      allow read: if (isStaff() && approved() && (sameFacility(resource.data) || ownedByMother(resource.data)))
-        || isAdmin() || ownedByMother(resource.data);
-      allow create: if (isStaff() && approved() && facilityFieldEquals(request.resource.data, 'originFacilityId')) || isAdmin();
-      allow update: if isAdmin()
-        || (isStaff() && approved() && sameFacility(resource.data) && !changesFacilityKeys(resource.data, request.resource.data));
-      allow delete: if false;
-    }
+    /* ── Messaging ────────────────────────────────────────────────────── */
 
-    /* ── media: documents and generated reports ─────────────────────── */
-
-    match /documents/{documentId} {
-      // `accessRoles` / `accessUserIds` decide visibility; facility rows and the
-      // owning mother always qualify.
-      function mayReadDoc(data) {
-        let uidValue = uid();
-        return data.get(['accessUserIds']) != null && data.get(['accessUserIds']).containsAny([uidValue])
-          || data.get(['accessRoles']) != null && data.get(['accessRoles']).containsAny([role()]);
-      }
-
-      allow get: if isAdmin() || (approved() && (mayReadDoc(resource.data) || ownedByMother(resource.data) || sameFacility(resource.data)));
-      allow list: if approved();
-      // A health worker may register a document they uploaded themselves; the
-      // bytes are already in media storage by the time this row is written.
-      allow create: if (isStaff() && approved() && request.resource.data.uploadedBy == uid()) || isAdmin();
-      allow update: if isAdmin() || (isStaff() && approved() && resource.data.uploadedBy == uid());
-      // Deletion of the stored bytes happens in the API service, which verifies
-      // the caller again and records the audit entry.
-      allow delete: if false;
-    }
-
-    match /reports/{reportId} {
-      function mayReadReport(data) {
-        return data.get(['accessUserIds']) != null && data.get(['accessUserIds']).containsAny([uid()])
-          || data.get(['accessRoles']) != null && data.get(['accessRoles']).containsAny([role()]);
-      }
-
-      allow get: if isAdmin() || (approved() && (mayReadReport(resource.data) || ownedByMother(resource.data) || sameFacility(resource.data)));
-      allow list: if approved();
-      // Reports are registered by the API service after the PDF is stored.
-      allow create, update, delete: if false;
-    }
-
-    /* ── notifications and devices ──────────────────────────────────── */
-
-    match /notifications/{notificationId} {
-      allow read: if signedIn() && resource.data.userId == uid();
-      // The API service writes notifications; a client may only mark its own read.
-      allow create: if isAdmin() || isSupervisor();
-      allow update: if signedIn() && resource.data.userId == uid()
-        && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['userId', 'kind', 'channels', 'title', 'body']);
-      allow delete: if false;
-    }
-
-    match /devices/{deviceId} {
-      allow read: if signedIn() && resource.data.userId == uid();
-      allow create, delete: if signedIn() && request.resource.data.userId == uid();
-      allow update: if false;
-    }
-
-    /* ── education ──────────────────────────────────────────────────── */
-
-    match /education/{resourceId} {
-      allow read: if resource.data.status == 'PUBLISHED' || (isStaff() && approved());
-      allow create, update, delete: if isSupervisor() && approved();
-    }
-
-    /* ── clinical rule set (read by staff, written via API/settings) ─── */
-
-    match /alert_rules/{ruleId} {
-      allow read: if isStaff() && approved();
-      allow write: if false;
-    }
-
-    /* ── settings ───────────────────────────────────────────────────── */
-
-    match /settings/{settingsId} {
-      allow read: if isSupervisor() && approved();
-      allow write: if isAdmin();
-    }
-
-    /* ── audit log: append-only ─────────────────────────────────────── */
-
-    match /audit_logs/{entryId} {
-      allow get: if isAdmin() || (isSupervisor() && approved() && resource.data.get(['facilityId']) == facilityId());
-      allow list: if isAdmin() || isSupervisor();
-      // Any approved account appends; nobody edits or removes an entry, and the
-      // actor fields cannot be forged because they must match the caller's token.
-      allow create: if approved()
-        && request.resource.data.actorId == uid()
-        && request.resource.data.actorName == claim('name')
-        && request.resource.data.actorRole == role();
-      allow update, delete: if false;
-    }
-
-    /* ── direct messages ────────────────────────────────────────────── */
-
-    // A thread is private to its two participants. `participantIds` carries both
-    // uid values, so "am I part of this conversation?" is a single
-    // `array-contains` the database can answer without trusting the client.
     match /messages/{messageId} {
-      function recipientRole() {
-        return get(/databases/$(database)/documents/users/$(request.resource.data.recipientId)).data.role;
-      }
-
-      allow read: if approved() && uid() in resource.data.participantIds;
-      allow create: if approved()
-        && request.resource.data.senderId == uid()
-        && uid() in request.resource.data.participantIds
-        && request.resource.data.participantIds.size() == 2
-        && request.resource.data.recipientId != uid()
-        // Staff may open a thread with anyone. A mother may only write to a
-        // health-worker account — never to another patient — so no account can
-        // start a conversation with an arbitrary mother.
-        && (isStaff() || (isMother() && recipientRole() != 'MOTHER'));
-      // Only the recipient marks a message read, and only that field changes.
-      allow update: if approved()
-        && uid() in resource.data.participantIds
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['readAt']);
+      allow read: if isAdmin()
+        || (signedIn() && (resource.data.fromUserId == uid() || resource.data.toUserId == uid()));
+      allow create: if accountInGoodStanding()
+        && request.resource.data.fromUserId == uid()
+        && request.resource.data.toUserId is string
+        && request.resource.data.toUserId != uid();
+      // Marking a message read is the only edit anybody may make.
+      allow update: if signedIn()
+        && (resource.data.fromUserId == uid() || resource.data.toUserId == uid())
+        && unchanged('body')
+        && unchanged('fromUserId')
+        && unchanged('toUserId')
+        && unchanged('threadId')
+        && unchanged('createdAt');
+      // Messages are never deleted: report one instead, and an administrator decides.
       allow delete: if false;
     }
 
-    /* ── announcements ──────────────────────────────────────────────── */
+    /* ── Care sharing ─────────────────────────────────────────────────── */
 
-    // Published notices are public so the landing page and a signed-out visitor
-    // can read them; everything else requires a supervisor.
-    match /announcements/{announcementId} {
-      allow read: if (resource.data.published == true && resource.data.status == 'SENT')
-        || isSupervisor() && approved();
-      allow create, update: if isSupervisor() && approved()
-        && request.resource.data.createdBy == uid();
+    match /care_links/{linkId} {
+      allow read: if isAdmin()
+        || isFacilityAdmin()
+        || (signedIn() && (resource.data.motherUserId == uid() || resource.data.providerUserId == uid()));
+
+      // A mother grants a link; a clinician may only open a request she accepts.
+      allow create: if accountInGoodStanding()
+        && (request.resource.data.motherUserId == uid() || request.resource.data.providerUserId == uid())
+        && linkId == request.resource.data.motherUserId + '__' + request.resource.data.providerUserId;
+
+      allow update: if isAdmin()
+        // The mother controls status, including revoking at any time.
+        || (accountInGoodStanding() && resource.data.motherUserId == uid())
+        // A clinician may withdraw a request they made, and nothing more.
+        || (accountInGoodStanding() && resource.data.providerUserId == uid()
+              && request.resource.data.status == 'revoked'
+              && unchanged('motherUserId')
+              && unchanged('providerUserId'));
+
+      allow delete: if isAdmin() || (accountInGoodStanding() && resource.data.motherUserId == uid());
+    }
+
+    match /supporters/{linkId} {
+      allow read: if isAdmin()
+        || (signedIn() && (resource.data.motherUserId == uid()
+              || resource.data.supporterUserId == uid()
+              || resource.data.supporterEmail == email().lower()));
+
+      allow create: if accountInGoodStanding()
+        && request.resource.data.motherUserId == uid()
+        && linkId == request.resource.data.motherUserId + '__' + request.resource.data.supporterEmail;
+
+      // The mother sets and changes permissions; the supporter may only accept.
+      allow update: if isAdmin()
+        || (accountInGoodStanding() && resource.data.motherUserId == uid())
+        || (accountInGoodStanding()
+              && (resource.data.supporterUserId == uid() || resource.data.supporterEmail == email().lower())
+              && unchanged('motherUserId')
+              && unchanged('permissions')
+              && unchanged('supporterName')
+              && unchanged('relationship'));
+
+      allow delete: if isAdmin() || (accountInGoodStanding() && resource.data.motherUserId == uid());
+    }
+
+    /* ── Public content ───────────────────────────────────────────────── */
+
+    match /articles/{articleId} {
+      // Published public articles are readable by anyone; published mother-facing
+      // articles by any signed-in person; drafts and provider-only content by staff.
+      allow read: if (resource.data.status == 'published' && resource.data.audience == 'public')
+        || (signedIn() && resource.data.status == 'published' && resource.data.audience != 'provider')
+        || isStaff();
+
+      // Staff write education. Publishing is an administrator decision, so a
+      // provider cannot flip `status` to published and cannot delete.
+      allow create: if accountInGoodStanding() && isStaff() && request.resource.data.status != 'published';
+
+      // Staff edit drafts. Anything already published is an administrator's to
+      // change, so a live article cannot be rewritten without a second clinician.
+      allow update: if isAdmin()
+        || (accountInGoodStanding() && isStaff()
+              && resource.data.status != 'published'
+              && request.resource.data.status != 'published');
+
       allow delete: if isAdmin();
     }
 
-    /* ── services catalogue ─────────────────────────────────────────── */
+    match /facilities/{facilityId} {
+      allow read: if isAdmin() || isFacilityAdmin() || resource.data.active == true;
+      allow create: if accountInGoodStanding() && (isAdmin() || isFacilityAdmin());
+      allow update: if isAdmin()
+        || (accountInGoodStanding() && isFacilityAdmin() && resource.data.id == myFacilityId());
+      // Removing a facility breaks history on appointments already recorded there.
+      allow delete: if isAdmin();
+    }
 
-    // World-readable when available: the public site lists what the facility
-    // offers. Only an administrator maintains the catalogue.
-    match /services/{serviceId} {
-      allow read: if resource.data.available == true || (isStaff() && approved());
+    match /providers/{providerId} {
+      // The directory is public for verified, listed clinicians. Everybody else sees
+      // only their own record — and administrators see all of them.
+      allow read: if isAdmin()
+        || (signedIn() && resource.data.userId == uid())
+        || (resource.data.status == 'approved' && resource.data.listedInDirectory == true);
+      // The directory has to be listable by a visitor who has not registered, and
+      // rules evaluate a list query as a whole rather than per document, so a crafted
+      // query can read rows the UI filters out. Verified detail reads stay restricted
+      // above; see README “Security” for the recommended hardening (move licence and
+      // verification fields into an admin-only subcollection) before going live.
+      allow list: if request.query.limit <= 500;
+
+      allow create: if accountInGoodStanding()
+        && (request.resource.data.userId == uid()
+              || (isFacilityAdmin() && request.resource.data.facilityId == myFacilityId()));
+
+      // Verification fields belong to an administrator; a clinician edits their own
+      // profile but cannot verify themselves.
+      allow update: if isAdmin()
+        || (accountInGoodStanding() && isFacilityAdmin() && resource.data.facilityId == myFacilityId())
+        || (accountInGoodStanding() && resource.data.userId == uid()
+              && unchanged('status')
+              && unchanged('verifiedBy')
+              && unchanged('verifiedAt')
+              && unchanged('rejectionReason')
+              && unchanged('userId'));
+
+      allow delete: if isAdmin();
+    }
+
+    match /announcements/{announcementId} {
+      allow read: if isAdmin()
+        || resource.data.audience == 'all'
+        || (signedIn() && resource.data.audience == 'mothers' && (isMother() || isSupporter()))
+        || (signedIn() && resource.data.audience in ['providers', 'facility'] && isStaff());
       allow create, update, delete: if isAdmin();
     }
 
-    /* ── counters (canonical patient ids) ───────────────────────────── */
-
-    // Patient ids come from a server-side counter so two devices can never mint
-    // the same one. The row holds a single number; nobody may delete it, and
-    // only approved staff (or an administrator) may move it forward.
-    match /counters/{counterId} {
-      function counterWritable() {
-        return (isStaff() && approved()) || isAdmin();
-      }
-      function counterShape() {
-        return request.resource.data.keys().hasOnly(['value', 'updatedAt', 'id', 'createdAt', 'createdBy'])
-          && request.resource.data.value is int
-          && request.resource.data.value >= 0;
-      }
-
-      allow get: if counterWritable();
-      allow list: if isAdmin();
-      allow create: if counterWritable() && counterShape();
-      // A counter only ever moves forward; a stale device cannot rewind it.
-      allow update: if counterWritable() && counterShape()
-        && request.resource.data.value >= resource.data.value;
-      allow delete: if false;
+    match /settings/{settingsId} {
+      // The global document holds support contacts and emergency numbers the public
+      // site needs before anybody signs in.
+      allow read: if settingsId == 'global' || isAdmin();
+      // First-run bootstrap is allowed so a new deployment is never locked out;
+      // after that only an administrator changes system settings.
+      allow create: if (!exists(/databases/$(database)/documents/settings/$(settingsId))
+              && request.resource.data.providerApprovalsRequired == true)
+        || (accountInGoodStanding() && isAdmin());
+      allow update, delete: if isAdmin();
     }
 
-    /* ── anything else is closed ────────────────────────────────────── */
+    /* ── Reports, feedback and the audit trail ────────────────────────── */
 
+    match /reports/{reportId} {
+      allow read: if isAdmin()
+        || isFacilityAdmin()
+        || (signedIn() && resource.data.reporterId == uid());
+      // Anyone signed in may report something wrong or unsafe.
+      allow create: if accountInGoodStanding() && request.resource.data.reporterId == uid();
+      allow update: if isAdmin() || isFacilityAdmin();
+      allow delete: if isAdmin();
+    }
+
+    match /feedback/{feedbackId} {
+      allow read: if isAdmin()
+        || isFacilityAdmin()
+        || (signedIn() && (resource.data.userId == uid() || resource.data.email == email()));
+      // The public contact form accepts messages from people who are not signed in.
+      allow create: if request.resource.data.message is string
+        && request.resource.data.message.size() >= 10
+        && request.resource.data.message.size() <= 4000;
+      allow update: if isAdmin() || isFacilityAdmin();
+      allow delete: if isAdmin();
+    }
+
+    match /audit_logs/{entryId} {
+      // Append-only. The app stamps the actor; nobody rewrites history, and only an
+      // administrator reads it.
+      allow read, list: if isAdmin();
+      allow create: if signedIn() && request.resource.data.actorId == uid();
+      allow update, delete: if false;
+    }
+
+    /* ── Device-only stores ───────────────────────────────────────────── */
+
+    // These three exist for the offline IndexedDB build (queued writes, local blob
+    // copies and interface metadata). They have no business in a shared database,
+    // so they are closed here rather than left to a default rule.
+    match /outbox/{document=**} {
+      allow read, write: if false;
+    }
+
+    match /blobs/{document=**} {
+      allow read, write: if false;
+    }
+
+    match /meta/{document=**} {
+      allow read, write: if false;
+    }
+
+    /* Everything not matched above is denied. That is the point: a new collection
+     * added to the data layer is closed by default until somebody writes a rule for
+     * it and explains, in a comment, who it is for. */
     match /{document=**} {
       allow read, write: if false;
     }

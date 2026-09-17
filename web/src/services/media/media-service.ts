@@ -1,65 +1,57 @@
 /**
- * Media, documents and reports.
+ * Media service — the one place the app uploads, resolves and deletes files.
  *
- * Thin domain layer over the Cloudinary service: it decides which folder an asset
- * belongs to, records the metadata document (permissions included), and writes the
- * audit entry. Nothing here is allowed to publish a sensitive file: reports and
- * medical documents are uploaded with a non-public access mode and are opened
- * through a resolved URL, never a stored public one.
+ * Routing is decided by sensitivity, not by convenience:
+ *
+ *  • **Public imagery** (profile photos, facility photos, article covers,
+ *    branding) goes to **Cloudinary** through the unsigned preset, flat at the
+ *    media-library root. Those assets are meant to be delivered by a CDN.
+ *  • **Personal health documents** (scan results, prescriptions, birth records,
+ *    immunization cards) go to **Firebase Storage** under `mamacare/documents/…`,
+ *    where `storage.rules` decides who may read them. They never receive a public
+ *    CDN URL.
+ *  • With neither backend reachable the file stays in this browser and the
+ *    interface says so, rather than pretending it was uploaded.
  */
 
 import { AppError, toAppError } from '@/lib/errors';
 import { newId } from '@/lib/ids';
+import { validateFile, MAX_DOCUMENT_BYTES, MAX_IMAGE_BYTES, IMAGE_ACCEPTED_MIME, DOCUMENT_ACCEPTED_MIME } from '@/lib/validation';
 import { services } from '@/services/session-store';
 import { cloudinaryConfig } from '@/config/env';
 import {
+  accessModeFor,
   deleteAsset,
-  storagePathFor,
   resolveAssetUrl,
   uploadAsset,
   type MediaFolder,
   type UploadedAsset,
 } from '@/services/media/cloudinary';
-import type { DocumentCategory, DocumentRecord, ReportRecord, Role } from '@/types/domain';
-import { CLINICAL_ROLES } from '@/types/domain';
+import type { DocumentRecord, Role } from '@/types/domain';
 
-const CATEGORY_FOLDER: Record<DocumentCategory, MediaFolder> = {
-  REPORT: 'reports',
-  MEDICAL: 'documents',
-  REFERRAL: 'documents',
-  FACILITY: 'facilities',
-  EDUCATION: 'education',
-  CONSENT: 'documents',
-  LABORATORY: 'documents',
-  OTHER: 'documents',
-};
+export const IMAGE_FOLDERS = ['profiles', 'facilities', 'education', 'branding', 'public'] as const;
+export type ImageFolder = (typeof IMAGE_FOLDERS)[number];
 
-const DEFAULT_ACCESS: Record<MediaFolder, Role[]> = {
-  reports: ['ADMIN', 'FACILITY_SUPERVISOR', 'MIDWIFE', 'NURSE'],
-  documents: ['ADMIN', 'FACILITY_SUPERVISOR', 'MIDWIFE', 'NURSE', 'COMMUNITY_HEALTH_WORKER'],
-  profiles: ['ADMIN', 'FACILITY_SUPERVISOR', 'MIDWIFE', 'NURSE', 'COMMUNITY_HEALTH_WORKER', 'MOTHER'],
-  mothers: ['ADMIN', 'FACILITY_SUPERVISOR', 'MIDWIFE', 'NURSE'],
-  facilities: ['ADMIN', 'FACILITY_SUPERVISOR', 'MIDWIFE', 'NURSE', 'COMMUNITY_HEALTH_WORKER', 'MOTHER'],
-  education: ['ADMIN', 'FACILITY_SUPERVISOR', 'MIDWIFE', 'NURSE', 'COMMUNITY_HEALTH_WORKER', 'MOTHER'],
-  branding: ['ADMIN', 'FACILITY_SUPERVISOR', 'MIDWIFE', 'NURSE', 'COMMUNITY_HEALTH_WORKER', 'MOTHER'],
-  public: ['ADMIN', 'FACILITY_SUPERVISOR', 'MIDWIFE', 'NURSE', 'COMMUNITY_HEALTH_WORKER', 'MOTHER'],
-};
+export const DOCUMENT_CATEGORIES: { value: DocumentRecord['category']; label: string }[] = [
+  { value: 'scan', label: 'Scan report' },
+  { value: 'lab-result', label: 'Laboratory result' },
+  { value: 'prescription', label: 'Prescription' },
+  { value: 'birth-record', label: 'Birth record' },
+  { value: 'immunization-card', label: 'Child health card' },
+  { value: 'other', label: 'Other document' },
+];
+
+/** Uploads a public image. Returns the asset so the caller stores what it needs. */
+export async function uploadImage(file: File, folder: ImageFolder, hint?: string): Promise<UploadedAsset> {
+  const problem = validateFile(file, { accept: IMAGE_ACCEPTED_MIME, maxBytes: MAX_IMAGE_BYTES });
+  if (problem) throw new AppError(problem, 'UNSUPPORTED_FILE');
+  return uploadAsset({ file, folder, publicIdHint: hint, tags: ['mamacare', folder] });
+}
 
 export interface UploadContext {
-  category: DocumentCategory;
-  name: string;
-  description?: string | null;
-  motherId?: string | null;
-  patientId?: string | null;
-  pregnancyId?: string | null;
-  visitId?: string | null;
-  referralId?: string | null;
-  facilityId?: string | null;
-  ownerUserId?: string | null;
-  accessRoles?: Role[];
-  accessUserIds?: string[];
-  onProgress?: (percent: number, state: 'validating' | 'uploading' | 'finalising') => void;
-  signal?: AbortSignal;
+  title: string;
+  category: DocumentRecord['category'];
+  notes?: string | null;
 }
 
 export interface MediaUploadResult {
@@ -67,237 +59,104 @@ export interface MediaUploadResult {
   asset: UploadedAsset;
 }
 
+/**
+ * Uploads a personal health document. Always routed to the sensitive folder, so
+ * it lands in Firebase Storage — never in the public media library.
+ */
 export async function uploadDocument(file: File, context: UploadContext): Promise<MediaUploadResult> {
-  const registry = services();
-  const actor = registry.require();
-  const folder = CATEGORY_FOLDER[context.category];
+  const problem = validateFile(file, { accept: DOCUMENT_ACCEPTED_MIME, maxBytes: MAX_DOCUMENT_BYTES });
+  if (problem) throw new AppError(problem, 'UNSUPPORTED_FILE');
+  const me = services().require();
 
-  let motherPatientId = context.patientId ?? null;
-  if (context.motherId) {
-    const mother = await registry.data.get('mothers', context.motherId);
-    if (!mother) throw new AppError('The patient record for this upload could not be found.', 'NOT_FOUND');
-    motherPatientId = mother.patientId;
-  }
+  const asset = await uploadAsset({
+    file,
+    folder: 'documents',
+    subFolder: me.uid,
+    publicIdHint: context.title,
+    resourceType: file.type.startsWith('image/') ? 'image' : 'raw',
+    tags: ['mamacare', 'document', context.category],
+    metadata: { owner: me.uid, category: context.category },
+  });
 
-  const subFolder = motherPatientId ?? context.facilityId ?? undefined;
-  const accessRoles = context.accessRoles ?? DEFAULT_ACCESS[folder];
+  const record = await services().data.create('documents', {
+    userId: me.uid,
+    title: context.title,
+    category: context.category,
+    publicId: asset.publicId,
+    secureUrl: asset.secureUrl,
+    localHandle: asset.localHandle ?? null,
+    mimeType: asset.mimeType,
+    bytes: asset.bytes,
+    accessMode: accessModeFor('documents'),
+    uploadedBy: me.uid,
+    notes: context.notes ?? null,
+  } as Omit<DocumentRecord, 'id' | 'createdAt'>);
 
-  try {
-    const asset = await uploadAsset({
-      file,
-      folder,
-      subFolder,
-      publicIdHint: context.name,
-      tags: motherPatientId ? [`patient-${motherPatientId}`] : undefined,
-      context: {
-        patient: motherPatientId ?? 'n/a',
-        category: context.category,
-        uploaded_by: actor.uid,
-      },
-      metadata: {
-        mamacare_category: context.category,
-        mamacare_folder: storagePathFor(folder, subFolder),
-        mamacare_patient: motherPatientId ?? '',
-        mamacare_facility: context.facilityId ?? '',
-      },
-      onProgress: context.onProgress,
-      signal: context.signal,
-    });
-
-    const record = (await registry.data.registerDocument({
-      name: context.name.trim(),
-      category: context.category,
-      description: context.description ?? null,
-      ownerUserId: context.ownerUserId ?? (folder === 'profiles' ? actor.uid : null),
-      motherId: context.motherId ?? null,
-      patientId: motherPatientId,
-      pregnancyId: context.pregnancyId ?? null,
-      visitId: context.visitId ?? null,
-      referralId: context.referralId ?? null,
-      facilityId: context.facilityId ?? actor.facilityId ?? null,
-      mimeType: asset.mimeType,
-      sizeBytes: asset.bytes,
-      publicId: asset.publicId,
-      secureUrl: asset.storage === 'device' ? null : asset.secureUrl,
-      localHandle: asset.localHandle ?? null,
-      folder: asset.folder,
-      version: 1,
-      checksum: asset.checksum ?? null,
-      accessRoles,
-      accessUserIds: [actor.uid, ...(context.accessUserIds ?? [])],
-      accessMode: asset.accessMode === 'public' ? 'PUBLIC_READ' : 'AUTHENTICATED',
-      metadata: { storage: asset.storage, uploadedAt: asset.uploadedAt },
-    })) as DocumentRecord;
-
-    await registry.data.audit('document.uploaded', 'document', record.id, {
-      label: record.name,
-      facilityId: record.facilityId,
-      metadata: { category: record.category, bytes: record.sizeBytes, storage: asset.storage },
-    });
-
-    return { record, asset };
-  } catch (error) {
-    const mapped = toAppError(error);
-    throw new AppError(mapped.message, mapped.code, { retryable: mapped.retryable });
-  }
+  return { record, asset };
 }
 
-/** Opens a stored file. Sensitive assets resolve to a short-lived signed URL. */
-export async function openDocument(record: DocumentRecord, options: { purpose?: 'view' | 'download' } = {}): Promise<string> {
-  const registry = services();
-  const url = await resolveAssetUrl({
-    publicId: record.publicId,
-    secureUrl: record.secureUrl,
-    localHandle: record.localHandle,
-    accessMode: record.accessMode === 'PUBLIC_READ' ? 'public' : 'authenticated',
-    mimeType: record.mimeType,
-  });
-  await registry.data
-    .audit('document.accessed', 'document', record.id, {
-      label: record.name,
-      metadata: { purpose: options.purpose ?? 'view', category: record.category },
-    })
-    .catch(() => null);
-  return url;
+/** Resolves a document to a viewable address. Rules decide whether it is allowed. */
+export async function openDocument(
+  record: DocumentRecord,
+  options: { purpose?: 'view' | 'download' } = {},
+): Promise<string> {
+  try {
+    const url = await resolveAssetUrl({
+      publicId: record.publicId,
+      secureUrl: record.secureUrl,
+      localHandle: record.localHandle,
+      accessMode: record.accessMode,
+      mimeType: record.mimeType,
+    });
+    if (options.purpose === 'download') return url;
+    return url;
+  } catch (error) {
+    throw toAppError(error, 'This file could not be opened. It may have been removed.');
+  }
 }
 
 export async function deleteDocument(record: DocumentRecord): Promise<void> {
-  const registry = services();
-  await deleteAsset({
-    publicId: record.publicId,
-    localHandle: record.localHandle,
-    accessMode: record.accessMode === 'PUBLIC_READ' ? 'public' : 'authenticated',
-  }).catch((error: unknown) => {
-    const mapped = toAppError(error);
-    throw new AppError(mapped.message, mapped.code, { retryable: mapped.retryable });
+  await services().data.remove('documents', record.id);
+  await deleteAsset({ publicId: record.publicId, localHandle: record.localHandle, accessMode: record.accessMode }).catch(() => undefined);
+}
+
+export async function listDocuments(userId?: string): Promise<DocumentRecord[]> {
+  const me = services().actorRef();
+  const owner = userId ?? me?.uid;
+  if (!owner) return [];
+  return services().data.rows('documents', {
+    where: [{ field: 'userId', op: '==', value: owner }],
+    orderBy: { field: 'createdAt', direction: 'desc' },
   });
-  await registry.data.remove('documents', record.id);
-  await registry.data.audit('document.deleted', 'document', record.id, { label: record.name });
 }
 
-/** Profile / facility imagery: a URL on the record, no document entry needed. */
-export async function uploadImage(file: File, folder: Extract<MediaFolder, 'profiles' | 'facilities' | 'education' | 'branding' | 'public'>, hint?: string): Promise<UploadedAsset> {
-  return uploadAsset({ file, folder, publicIdHint: hint, resourceType: 'image' });
-}
-
-/* ── Reports ─────────────────────────────────────────────────────────── */
-
-export interface GeneratedReport {
-  fileName: string;
-  blob: Blob;
-  bytes: number;
-  summary: ReportRecord['summary'];
-}
-
-export async function storeReport(input: {
-  report: GeneratedReport;
-  title: string;
-  type: ReportRecord['type'];
-  scope: ReportRecord['scope'];
-  period: { from: string; to: string };
-  motherId?: string | null;
-  patientId?: string | null;
-  pregnancyId?: string | null;
-  facilityId?: string | null;
-  filters?: Record<string, string | number | boolean | null> | null;
-  accessRoles?: Role[];
-  accessUserIds?: string[];
-  rowCount?: number | null;
-  onProgress?: (percent: number, state: 'validating' | 'uploading' | 'finalising') => void;
-}): Promise<ReportRecord> {
-  const registry = services();
-  const actor = registry.require();
-  const file = new File([input.report.blob], input.report.fileName, { type: 'application/pdf' });
-
-  let asset: UploadedAsset | null = null;
-  try {
-    asset = await uploadAsset({
-      file,
-      folder: 'reports',
-      subFolder: input.patientId ?? input.facilityId ?? undefined,
-      tags: [input.type.toLowerCase(), 'report'],
-      context: { report: input.type, scope: input.scope, patient: input.patientId ?? 'aggregate' },
-      metadata: {
-        mamacare_kind: 'report',
-        mamacare_report_type: input.type,
-        mamacare_period: `${input.period.from}_${input.period.to}`,
-      },
-      onProgress: input.onProgress,
-    });
-  } catch (error) {
-    const mapped = toAppError(error);
-    await registry.data.audit('report.generated', 'report', newId('rpt'), {
-      metadata: { status: 'FAILED', type: input.type, reason: mapped.code },
-    });
-    throw new AppError('Report generation failed. The data is safe — please retry.', mapped.code, { retryable: true });
-  }
-
-  const record = (await registry.data.registerReport({
-    title: input.title,
-    type: input.type,
-    scope: input.scope,
-    motherId: input.motherId ?? null,
-    patientId: input.patientId ?? null,
-    pregnancyId: input.pregnancyId ?? null,
-    facilityId: input.facilityId ?? null,
-    period: input.period,
-    filters: input.filters ?? null,
-    format: 'PDF',
-    status: 'GENERATED',
-    fileName: input.report.fileName,
-    file: {
-      publicId: asset.publicId,
-
-      secureUrl: asset.storage === 'device' ? '' : (asset.secureUrl ?? ''),
-      bytes: asset.bytes,
-      localHandle: asset.localHandle ?? null,
-      version: asset.version ?? null,
-    },
-    summary: input.report.summary,
-    rowCount: input.rowCount ?? null,
-    // Reports are never public: the access list is the source of truth, and the
-    // file itself is stored with a non-public Cloudinary access mode.
-    accessRoles: input.accessRoles ?? [...CLINICAL_ROLES, 'MOTHER' as const],
-    accessUserIds: [actor.uid, ...(input.accessUserIds ?? [])],
-    expiresAt: null,
-  })) as ReportRecord;
-
-  await registry.data.audit('report.generated', 'report', record.id, {
-    label: record.title,
-    facilityId: record.facilityId,
-    metadata: { type: record.type, rows: record.rowCount ?? 0, storage: asset.storage, bytes: record.file?.bytes ?? 0 },
-  });
-  return record;
-}
-
-export async function openReport(record: ReportRecord): Promise<string> {
-  if (!record.file) throw new AppError('The stored file for this report is missing.', 'NOT_FOUND');
-  const registry = services();
-  if (!canAccessReport(record, registry.require().role, registry.require().uid, record.motherId ? registry.require().motherId : null)) {
-    throw new AppError('This report is not available to your role.', 'FORBIDDEN');
-  }
-  const url = await resolveAssetUrl({
-    publicId: record.file.publicId,
-    secureUrl: record.file.secureUrl || null,
-    localHandle: record.file.localHandle,
-    accessMode: 'private',
-    mimeType: 'application/pdf',
-  });
-  await registry.data
-    .audit('report.downloaded', 'report', record.id, { label: record.title, metadata: { type: record.type } })
-    .catch(() => null);
-  return url;
-}
-
-export function canAccessReport(record: ReportRecord, role: Role, uid: string, motherId: string | null): boolean {
-  if (record.generatedBy === uid) return true;
+/** Can this person open this document? Mirrors the policy module for the UI. */
+export function canAccessDocument(record: DocumentRecord, role: Role, uid: string): boolean {
   if (role === 'ADMIN') return true;
-  if (record.accessUserIds.includes(uid)) return true;
-  if (role === 'MOTHER') return Boolean(motherId && record.motherId === motherId && record.accessRoles.includes('MOTHER'));
-  return record.accessRoles.includes(role);
+  return record.userId === uid;
 }
 
-export const cloudinaryStatus = (): { enabled: boolean; preset: boolean } => ({
-  enabled: cloudinaryConfig.enabled,
-  preset: cloudinaryConfig.browserUploadEnabled,
-});
+/** Human-readable summary of where media goes, shown on the media screens. */
+export const cloudinaryStatus = (): { label: string; detail: string; tone: 'green' | 'amber' | 'red' } => {
+  if (cloudinaryConfig.browserUploadEnabled) {
+    return {
+      label: `Cloudinary — ${cloudinaryConfig.cloudName}`,
+      detail: 'Public imagery uploads through the unsigned preset and is delivered from the media-library root.',
+      tone: 'green',
+    };
+  }
+  if (cloudinaryConfig.enabled) {
+    return {
+      label: `Cloudinary — ${cloudinaryConfig.cloudName}`,
+      detail: 'Delivery is configured, but no unsigned upload preset is set, so uploads are not available.',
+      tone: 'amber',
+    };
+  }
+  return {
+    label: 'Cloudinary not configured',
+    detail: 'Set VITE_CLOUDINARY_CLOUD_NAME and VITE_CLOUDINARY_UPLOAD_PRESET to enable image uploads.',
+    tone: 'red',
+  };
+};
+
+export const newMediaId = () => newId('media');

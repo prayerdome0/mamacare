@@ -1,320 +1,397 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Megaphone, PencilLine, RefreshCw, Send, Trash2, Users } from 'lucide-react';
-import { AppShell } from '@/components/layout/shell';
-import { Card } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Badge, EmptyState, ErrorState, LoadingRows, NoticeState } from '@/components/ui/display';
-import { CheckboxRow, Field, Select, TextArea, TextInput } from '@/components/ui/form';
-import { useSession } from '@/providers/app-providers';
-import { useAsync } from '@/hooks';
-import { useToast } from '@/components/ui/toast';
-import { services } from '@/services/session-store';
-import {
-  audienceSize,
-  createAnnouncement,
-  deleteAnnouncement,
-  listAnnouncements,
-  sendAnnouncement,
-  updateAnnouncement,
-} from '@/services/notifications/announcement-service';
-import { ANNOUNCEMENT_AUDIENCE_LABELS, type Announcement, type AnnouncementAudience } from '@/types/domain';
-import { formatDateTime, relativeTime } from '@/lib/utils';
-
 /**
- * Announcements.
+ * Administrator — announcements.
  *
- * The administrator writes a notice once and chooses who receives it —
- * everyone, health workers, mothers, one facility, or selected individuals.
- * Sending writes one notification per recipient, and re-sending only reaches
- * people who have not had it yet, so a retry after a dropped connection never
- * duplicates anyone's inbox.
+ * Banners shown across the public site and the signed-in app: a cholera outbreak
+ * notice, a clinic closure, a scheduled maintenance window. They are deliberately
+ * blunt instruments — one message, a start and an end, an audience — because a
+ * banner that stays up too long teaches people to ignore the next one.
  */
-export default function AnnouncementsPage() {
-  const { actor, permissions } = useSession();
+
+import { useEffect, useMemo, useState } from 'react';
+import {
+  CalendarClock,
+  Eye,
+  Megaphone,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Trash2,
+} from 'lucide-react';
+import { useAsync } from '@/hooks';
+import { announcementRepo } from '@/services/repositories';
+import { logAudit } from '@/services/audit';
+import { useConfirm, useSession } from '@/providers/app-providers';
+import { formatDate, formatDateTime, relativeTime } from '@/lib/utils';
+import type { Announcement } from '@/types/domain';
+import { StaffPageHeader, StaffShell } from '@/components/layout/staff-shell';
+import { Button } from '@/components/ui/button';
+import { Card, KeyValue, SectionHeading, StatCard } from '@/components/ui/card';
+import { Badge, EmptyState, ErrorState, LoadingRows } from '@/components/ui/display';
+import { CheckboxRow, Field, FieldGrid, Select, TextArea, TextInput } from '@/components/ui/form';
+import { Modal } from '@/components/ui/overlay';
+import { SegmentedControl } from '@/components/ui/tabs';
+import { useToast } from '@/components/ui/toast';
+
+const AUDIENCE_LABELS: Record<Announcement['audience'], string> = {
+  all: 'Everyone, including the public site',
+  mothers: 'Mothers and supporters',
+  providers: 'Providers only',
+  facility: 'Facility staff',
+};
+
+const TONE_CLASSES: Record<Announcement['tone'], string> = {
+  info: 'border-brand-200 bg-brand-50 text-ink-800',
+  warning: 'border-[var(--color-risk-amber-border)] bg-[var(--color-risk-amber-soft)] text-ink-800',
+  success: 'border-[var(--color-risk-green-border)] bg-[var(--color-risk-green-soft)] text-ink-800',
+};
+
+type Filter = 'active' | 'scheduled' | 'expired' | 'ALL';
+
+export default function AdminAnnouncements() {
+  const { actor } = useSession();
   const toast = useToast();
+  const confirm = useConfirm();
+  const [filter, setFilter] = useState<Filter>('active');
+  const [editing, setEditing] = useState<Announcement | null>(null);
+  const [creating, setCreating] = useState(false);
 
-  const [title, setTitle] = useState('');
-  const [body, setBody] = useState('');
-  const [audience, setAudience] = useState<AnnouncementAudience>('EVERYONE');
-  const [facilityId, setFacilityId] = useState('');
-  const [level, setLevel] = useState<Announcement['level']>('info');
-  const [recipients, setRecipients] = useState<string[]>([]);
-  const [busy, setBusy] = useState<string | null>(null);
+  const { data, loading, error, retryable, run } = useAsync(() => announcementRepo.all(), { immediate: true });
+  const rows = useMemo<Announcement[]>(() => data ?? [], [data]);
 
-  const list = useAsync(() => listAnnouncements(), {});
-  const facilities = useAsync(() => services().data.allFacilities(), {});
-  const people = useAsync(() => services().data.list('users', { where: [{ field: 'status', op: '==', value: 'ACTIVE' }], limit: 300 }), {});
+  const now = Date.now();
+  const stateOf = (announcement: Announcement): 'active' | 'scheduled' | 'expired' | 'off' => {
+    if (!announcement.active) return 'off';
+    const starts = announcement.startsAt ? new Date(announcement.startsAt).getTime() : null;
+    const ends = announcement.endsAt ? new Date(announcement.endsAt).getTime() : null;
+    if (starts && starts > now) return 'scheduled';
+    if (ends && ends < now) return 'expired';
+    return 'active';
+  };
 
-  const reach = useAsync(
-    () => (audience === 'INDIVIDUALS' && recipients.length === 0 ? Promise.resolve(0) : audienceSize(audience, facilityId || null, recipients)),
-    {},
+  const filtered = useMemo(() => {
+    if (filter === 'ALL') return rows;
+    return rows.filter((announcement) => stateOf(announcement) === filter);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows, filter, now]);
+
+  const counts = useMemo(
+    () => ({
+      total: rows.length,
+      active: rows.filter((item) => stateOf(item) === 'active').length,
+      scheduled: rows.filter((item) => stateOf(item) === 'scheduled').length,
+      expired: rows.filter((item) => stateOf(item) === 'expired').length,
+      off: rows.filter((item) => !item.active).length,
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [rows, now],
   );
-  const runReach = reach.run;
 
   useEffect(() => {
-    void runReach();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [audience, facilityId, recipients.length]);
+    document.title = 'Announcements · Mama Care admin';
+  }, []);
 
-  const peopleRows = useMemo(() => (people.data?.rows ?? []) as { id: string; fullName: string; role: string }[], [people.data]);
-
-  const reload = () => {
-    void list.run();
+  const toggle = async (announcement: Announcement): Promise<void> => {
+    const next = !announcement.active;
+    await announcementRepo.update(announcement.id, { active: next });
+    await logAudit('record-update', 'announcements', announcement.id, next ? `Activated: ${announcement.title}` : `Deactivated: ${announcement.title}`);
+    toast.success(next ? 'Announcement is live' : 'Announcement switched off');
+    void run();
   };
 
-  const submit = async (send: boolean) => {
-    if (title.trim().length < 3) {
-      toast.error(new Error('Give the announcement a title.'), 'Cannot save this announcement');
-      return;
-    }
-    if (body.trim().length < 10) {
-      toast.error(new Error('Write the message people will receive.'), 'Cannot save this announcement');
-      return;
-    }
-    setBusy(send ? 'send' : 'draft');
-    try {
-      const created = await createAnnouncement(
-        {
-          title,
-          body,
-          audience,
-          facilityId: audience === 'FACILITY' ? facilityId || null : null,
-          recipientIds: audience === 'INDIVIDUALS' ? recipients : [],
-          level,
-          link: null,
-        },
-        { send },
-      );
-      toast.success(
-        send ? 'Announcement sent' : 'Draft saved',
-        send
-          ? `${created.recipients} ${created.recipients === 1 ? 'person has' : 'people have'} it in their notifications.`
-          : 'Nothing was delivered yet. Send it when you are ready.',
-      );
-      setTitle('');
-      setBody('');
-      setRecipients([]);
-      reload();
-    } catch (error) {
-      toast.error(error, send ? 'The announcement could not be sent' : 'The draft could not be saved');
-    } finally {
-      setBusy(null);
-    }
+  const remove = async (announcement: Announcement): Promise<void> => {
+    const ok = await confirm({
+      title: `Delete “${announcement.title}”?`,
+      message: 'The banner disappears everywhere immediately and the record is gone. Deactivating keeps the wording for next time.',
+      confirmLabel: 'Delete',
+      tone: 'danger',
+    });
+    if (!ok) return;
+    await announcementRepo.remove(announcement.id);
+    await logAudit('record-delete', 'announcements', announcement.id, announcement.title);
+    toast.success('Announcement deleted');
+    void run();
   };
 
-  const resend = async (row: Announcement) => {
-    setBusy(row.id);
-    try {
-      const sent = await sendAnnouncement(row.id);
-      toast.success('Announcement sent', `${sent.recipients} people now have it. Anyone who already received it was skipped.`);
-      reload();
-    } catch (error) {
-      toast.error(error, 'The announcement could not be sent');
-    } finally {
-      setBusy(null);
-    }
-  };
+  return (
+    <StaffShell portal="Admin Dashboard">
+      <StaffPageHeader
+        title="Announcements"
+        description="Banners across the public site and the app. Set an end date when you create one — a notice that never expires is a notice nobody reads."
+        actions={
+          <>
+            <Button variant="ghost" size="sm" onClick={() => void run()} icon={<RefreshCw className="size-4" aria-hidden />}>
+              Refresh
+            </Button>
+            <Button variant="primary" size="sm" onClick={() => { setCreating(true); setEditing(null); }} icon={<Plus className="size-4" aria-hidden />}>
+              New announcement
+            </Button>
+          </>
+        }
+      />
 
-  const remove = async (row: Announcement) => {
-    setBusy(row.id);
-    try {
-      await deleteAnnouncement(row.id);
-      toast.info('Announcement removed', row.title);
-      reload();
-    } catch (error) {
-      toast.error(error, 'The announcement could not be removed');
-    } finally {
-      setBusy(null);
-    }
-  };
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <StatCard label="Live now" value={counts.active} icon={<Megaphone className="size-4" aria-hidden />} tone={counts.active > 0 ? 'brand' : 'default'} onClick={() => setFilter('active')} />
+        <StatCard label="Scheduled" value={counts.scheduled} icon={<CalendarClock className="size-4" aria-hidden />} onClick={() => setFilter('scheduled')} />
+        <StatCard label="Expired" value={counts.expired} icon={<Eye className="size-4" aria-hidden />} tone={counts.expired > 0 ? 'amber' : 'default'} onClick={() => setFilter('expired')} />
+        <StatCard label="Switched off" value={counts.off} icon={<Trash2 className="size-4" aria-hidden />} onClick={() => setFilter('ALL')} />
+      </div>
 
-  const togglePublished = async (row: Announcement) => {
-    setBusy(row.id);
+      {counts.expired > 0 ? (
+        <Card className="card-pad mt-4 border-[var(--color-risk-amber-border)] bg-[var(--color-risk-amber-soft)]">
+          <p className="text-sm text-ink-700">
+            {counts.expired} announcement{counts.expired === 1 ? ' has' : 's have'} passed its end date and no longer shows.
+            Delete or reuse the wording — an expired notice left in the list makes it harder to see what is actually live.
+          </p>
+        </Card>
+      ) : null}
+
+      <Card className="card-pad mt-4">
+        <SegmentedControl
+          value={filter}
+          onChange={setFilter}
+          ariaLabel="Announcement filter"
+          options={[
+            { value: 'active', label: 'Live', count: counts.active },
+            { value: 'scheduled', label: 'Scheduled', count: counts.scheduled },
+            { value: 'expired', label: 'Expired', count: counts.expired },
+            { value: 'ALL', label: 'All', count: counts.total },
+          ]}
+        />
+      </Card>
+
+      {error ? <ErrorState className="mt-4" title="Announcements could not be loaded" message={error} onRetry={retryable ? run : undefined} /> : null}
+      {loading ? <LoadingRows className="mt-4" rows={3} /> : null}
+      {!loading && !error && filtered.length === 0 ? (
+        <EmptyState
+          className="mt-4"
+          icon={<Megaphone className="size-6" aria-hidden />}
+          title={filter === 'active' ? 'Nothing is live' : 'No announcements here'}
+          description={
+            filter === 'active'
+              ? 'That is the normal state. Use a banner for something that changes what a mother should do today — an outbreak, a closed clinic, a maintenance window.'
+              : 'Create one when there is something time-bound everyone needs to see.'
+          }
+          action={
+            <Button variant="primary" size="sm" onClick={() => { setCreating(true); setEditing(null); }}>
+              New announcement
+            </Button>
+          }
+        />
+      ) : null}
+
+      <ul className="mt-4 space-y-3">
+        {filtered.map((announcement) => {
+          const state = stateOf(announcement);
+          return (
+            <li key={announcement.id}>
+              <Card className="card-pad">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h3 className="card-title">{announcement.title}</h3>
+                      <Badge tone={state === 'active' ? 'green' : state === 'scheduled' ? 'blue' : state === 'expired' ? 'amber' : 'neutral'}>
+                        {state === 'off' ? 'switched off' : state}
+                      </Badge>
+                      <Badge tone={announcement.tone === 'warning' ? 'amber' : announcement.tone === 'success' ? 'green' : 'brand'}>
+                        {announcement.tone}
+                      </Badge>
+                    </div>
+                    <p className={`mt-2 rounded-lg border px-3 py-2 text-sm ${TONE_CLASSES[announcement.tone]}`}>{announcement.body}</p>
+                    <div className="mt-2">
+                      <KeyValue
+                        columns={2}
+                        dense
+                        items={[
+                          { label: 'Audience', value: AUDIENCE_LABELS[announcement.audience] },
+                          { label: 'Link', value: announcement.link ?? 'None' },
+                          { label: 'Starts', value: announcement.startsAt ? formatDateTime(announcement.startsAt) : 'Immediately' },
+                          { label: 'Ends', value: announcement.endsAt ? formatDateTime(announcement.endsAt) : 'No end date' },
+                          { label: 'Created by', value: announcement.createdBy ?? '—' },
+                          { label: 'Last edited', value: relativeTime(announcement.updatedAt ?? announcement.createdAt) },
+                        ]}
+                      />
+                    </div>
+                  </div>
+                  <div className="actions-wrap">
+                    <Button variant="secondary" size="sm" onClick={() => { setEditing(announcement); setCreating(false); }} icon={<Pencil className="size-4" aria-hidden />}>
+                      Edit
+                    </Button>
+                    <Button variant={announcement.active ? 'ghost' : 'primary'} size="sm" onClick={() => void toggle(announcement)}>
+                      {announcement.active ? 'Switch off' : 'Make live'}
+                    </Button>
+                    <Button variant="ghost" size="sm" onClick={() => void remove(announcement)} aria-label={`Delete ${announcement.title}`} icon={<Trash2 className="size-4" aria-hidden />} />
+                  </div>
+                </div>
+              </Card>
+            </li>
+          );
+        })}
+      </ul>
+
+      <Card className="card-pad mt-4 border-ink-200 bg-ink-50">
+        <h3 className="card-title">Writing a banner people act on</h3>
+        <ul className="checklist mt-2 text-sm">
+          <li>One sentence, one action: what to do, and where to go if it is urgent.</li>
+          <li>Say how long it applies — “until 30 April” beats “currently”.</li>
+          <li>Never put a clinical instruction in a banner; that belongs in a reviewed article.</li>
+          <li>An emergency is never a banner. Use the emergency page and facility phone numbers.</li>
+        </ul>
+        <p className="mt-2 text-xs text-ink-500">Last checked {formatDate(new Date(), 'long')} · signed in as {actor?.displayName ?? 'administrator'}</p>
+      </Card>
+
+      <AnnouncementModal
+        open={creating || Boolean(editing)}
+        announcement={editing}
+        onClose={() => { setCreating(false); setEditing(null); }}
+        onSaved={() => { setCreating(false); setEditing(null); void run(); }}
+      />
+    </StaffShell>
+  );
+}
+
+function AnnouncementModal({
+  open,
+  announcement,
+  onClose,
+  onSaved,
+}: {
+  open: boolean;
+  announcement: Announcement | null;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const { actor } = useSession();
+  const toast = useToast();
+  const [title, setTitle] = useState('');
+  const [body, setBody] = useState('');
+  const [audience, setAudience] = useState<Announcement['audience']>('all');
+  const [tone, setTone] = useState<Announcement['tone']>('info');
+  const [link, setLink] = useState('');
+  const [startsAt, setStartsAt] = useState('');
+  const [endsAt, setEndsAt] = useState('');
+  const [active, setActive] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    setTitle(announcement?.title ?? '');
+    setBody(announcement?.body ?? '');
+    setAudience(announcement?.audience ?? 'all');
+    setTone(announcement?.tone ?? 'info');
+    setLink(announcement?.link ?? '');
+    setStartsAt(announcement?.startsAt ? toLocalInput(announcement.startsAt) : '');
+    setEndsAt(announcement?.endsAt ? toLocalInput(announcement.endsAt) : '');
+    setActive(announcement?.active ?? true);
+    setError(null);
+  }, [open, announcement]);
+
+  const submit = async (): Promise<void> => {
+    setError(null);
+    if (title.trim().length < 4) { setError('Give the announcement a short title.'); return; }
+    if (body.trim().length < 10) { setError('The banner text needs at least ten characters.'); return; }
+    if (startsAt && endsAt && new Date(startsAt) >= new Date(endsAt)) { setError('The end must be after the start.'); return; }
+    setBusy(true);
     try {
-      await updateAnnouncement(row.id, { published: !row.published });
-      toast.success(row.published ? 'Hidden from the public site' : 'Published to the public site', row.title);
-      reload();
-    } catch (error) {
-      toast.error(error, 'Could not change the announcement');
+      const payload = {
+        title: title.trim(),
+        body: body.trim(),
+        audience,
+        tone,
+        link: link.trim() || null,
+        startsAt: startsAt ? new Date(startsAt).toISOString() : null,
+        endsAt: endsAt ? new Date(endsAt).toISOString() : null,
+        active,
+      };
+      if (announcement) {
+        await announcementRepo.update(announcement.id, payload);
+        await logAudit('record-update', 'announcements', announcement.id, payload.title);
+        toast.success('Announcement updated');
+      } else {
+        await announcementRepo.create({ ...payload, createdBy: actor?.displayName ?? actor?.email ?? 'Administrator' });
+        await logAudit('record-create', 'announcements', null, payload.title);
+        toast.success('Announcement created', active ? 'It is showing now.' : 'It is saved but switched off.');
+      }
+      onSaved();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'That did not save.');
     } finally {
-      setBusy(null);
+      setBusy(false);
     }
   };
 
   return (
-    <AppShell
-      title="Announcements"
-      subtitle={`${list.data?.length ?? 0} notice${list.data?.length === 1 ? '' : 's'} · send to everyone, a group, a facility or selected people`}
-      actions={
-        <Button size="sm" variant="secondary" loading={list.loading} onClick={reload} icon={<RefreshCw className="size-4" aria-hidden />}>
-          Refresh
-        </Button>
+    <Modal
+      open={open}
+      onClose={onClose}
+      size="lg"
+      title={announcement ? 'Edit announcement' : 'New announcement'}
+      description="Shown as a banner at the top of the pages your audience sees. Keep it to one action."
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose} disabled={busy}>Cancel</Button>
+          <Button onClick={() => void submit()} loading={busy}>{announcement ? 'Save changes' : 'Create announcement'}</Button>
+        </>
       }
     >
-      {list.error ? (
-        <div className="mb-4">
-          <ErrorState message={list.error} onRetry={reload} />
+      <div className="space-y-4">
+        <Field label="Title" htmlFor="an-title" required error={error && title.trim().length < 4 ? error : undefined}>
+          <TextInput id="an-title" value={title} onValueChange={setTitle} placeholder="e.g. Cholera precautions in Lusaka" />
+        </Field>
+        <Field label="Banner text" htmlFor="an-body" required error={error && body.trim().length < 10 ? error : undefined} hint="Shown exactly as typed, on one or two lines.">
+          <TextArea id="an-body" rows={3} value={body} onChange={(event) => setBody(event.target.value)} placeholder="Boil or treat drinking water. If you have watery diarrhoea, go to the nearest clinic the same day." />
+        </Field>
+        <FieldGrid columns={2}>
+          <Field label="Audience" htmlFor="an-audience">
+            <Select
+              id="an-audience"
+              value={audience}
+              onChange={(event) => setAudience(event.target.value as Announcement['audience'])}
+              options={(Object.keys(AUDIENCE_LABELS) as Announcement['audience'][]).map((value) => ({ value, label: AUDIENCE_LABELS[value] }))}
+            />
+          </Field>
+          <Field label="Tone" htmlFor="an-tone" hint="Colour always travels with the wording.">
+            <Select
+              id="an-tone"
+              value={tone}
+              onChange={(event) => setTone(event.target.value as Announcement['tone'])}
+              options={[
+                { value: 'info', label: 'Information (teal)' },
+                { value: 'warning', label: 'Warning (amber)' },
+                { value: 'success', label: 'Positive (green)' },
+              ]}
+            />
+          </Field>
+        </FieldGrid>
+        <Field label="Link (optional)" htmlFor="an-link" hint="A path like /learn/cholera or a full URL.">
+          <TextInput id="an-link" value={link} onValueChange={setLink} placeholder="/emergency" />
+        </Field>
+        <FieldGrid columns={2}>
+          <Field label="Starts" htmlFor="an-starts" optional hint="Blank means immediately.">
+            <TextInput id="an-starts" type="datetime-local" value={startsAt} onValueChange={setStartsAt} />
+          </Field>
+          <Field label="Ends" htmlFor="an-ends" optional hint="Blank means it stays until you switch it off.">
+            <TextInput id="an-ends" type="datetime-local" value={endsAt} onValueChange={setEndsAt} />
+          </Field>
+        </FieldGrid>
+        <CheckboxRow checked={active} onChange={setActive} label="Live immediately" description="Switch off to save the wording without showing it." />
+        {error ? <p className="alert alert-error">{error}</p> : null}
+        <div>
+          <p className="micro">Preview</p>
+          <p className={`mt-1 rounded-lg border px-3 py-2 text-sm ${TONE_CLASSES[tone]}`}>
+            <strong className="font-semibold">{title || 'Your title'}</strong>
+            <span className="mt-0.5 block">{body || 'Your banner text appears here.'}</span>
+            {link ? <span className="mt-1 block text-xs underline">{link}</span> : null}
+          </p>
         </div>
-      ) : null}
-
-      <div className="grid gap-4 xl:grid-cols-[1.3fr_1fr]">
-        <div className="space-y-4">
-          <Card title="Write an announcement" description="Delivered to each recipient's notifications. Re-sending only reaches people who missed it.">
-            <div className="space-y-3">
-              <Field label="Title">
-                <TextInput value={title} onValueChange={setTitle} placeholder="Delivery ward visiting hours" maxLength={120} />
-              </Field>
-              <Field label="Message">
-                <TextArea
-                  rows={5}
-                  value={body}
-                  onValueChange={setBody}
-                  placeholder="Due to an infection-control review, visitor access to the delivery ward is suspended until further notice. Call the ward desk for urgent enquiries."
-                  maxLength={1200}
-                />
-              </Field>
-
-              <div className="grid gap-3 sm:grid-cols-2">
-                <Field label="Audience">
-                  <Select
-                    value={audience}
-                    onValueChange={(value) => setAudience(value as AnnouncementAudience)}
-                    placeholder={null}
-                    options={(Object.keys(ANNOUNCEMENT_AUDIENCE_LABELS) as AnnouncementAudience[]).map((key) => ({
-                      value: key,
-                      label: ANNOUNCEMENT_AUDIENCE_LABELS[key],
-                    }))}
-                  />
-                </Field>
-                <Field label="Tone">
-                  <Select
-                    value={level}
-                    onValueChange={(value) => setLevel(value as Announcement['level'])}
-                    placeholder={null}
-                    options={[
-                      { value: 'info', label: 'Information' },
-                      { value: 'success', label: 'Good news' },
-                      { value: 'warning', label: 'Important' },
-                      { value: 'critical', label: 'Urgent' },
-                    ]}
-                  />
-                </Field>
-              </div>
-
-              {audience === 'FACILITY' ? (
-                <Field label="Facility">
-                  <Select
-                    value={facilityId}
-                    onValueChange={setFacilityId}
-                    placeholder="Select a facility"
-                    options={(facilities.data ?? []).map((facility) => ({ value: facility.id, label: facility.name }))}
-                  />
-                </Field>
-              ) : null}
-
-              {audience === 'INDIVIDUALS' ? (
-                <div className="rounded-xl border border-ink-200 p-3">
-                  <p className="label">Recipients</p>
-                  <div className="mt-2 max-h-56 space-y-1 overflow-y-auto">
-                    {people.loading && peopleRows.length === 0 ? (
-                      <LoadingRows rows={3} />
-                    ) : (
-                      peopleRows.map((person) => (
-                        <CheckboxRow
-                          key={person.id}
-                          label={`${person.fullName} · ${person.role.replace(/_/g, ' ').toLowerCase()}`}
-                          checked={recipients.includes(person.id)}
-                          onChange={(checked) =>
-                            setRecipients((current) => (checked ? [...current, person.id] : current.filter((id) => id !== person.id)))
-                          }
-                        />
-                      ))
-                    )}
-                  </div>
-                </div>
-              ) : null}
-
-              <div className="flex flex-wrap items-center justify-between gap-3 border-t border-ink-200 pt-3">
-                <p className="caption flex items-center gap-1.5">
-                  <Users className="size-3.5" aria-hidden />
-                  {reach.data === null || reach.data === undefined
-                    ? 'Counting recipients…'
-                    : `Reaches ${reach.data} active account${reach.data === 1 ? '' : 's'}`}
-                </p>
-                <div className="flex gap-2">
-                  <Button variant="secondary" loading={busy === 'draft'} disabled={permissions.canAnnounce === false} onClick={() => void submit(false)} icon={<PencilLine className="size-4" aria-hidden />}>
-                    Save draft
-                  </Button>
-                  <Button loading={busy === 'send'} disabled={permissions.canAnnounce === false} onClick={() => void submit(true)} icon={<Send className="size-4" aria-hidden />}>
-                    Send now
-                  </Button>
-                </div>
-              </div>
-            </div>
-          </Card>
-        </div>
-
-        <Card title="Sent and scheduled" description="Published notices also appear on the public site." bodyClassName="p-0">
-          {list.loading && !list.data ? (
-            <div className="p-4">
-              <LoadingRows rows={4} />
-            </div>
-          ) : (list.data ?? []).length === 0 ? (
-            <div className="p-4">
-              <EmptyState
-                icon={<Megaphone className="size-5" aria-hidden />}
-                title="No announcements yet"
-                description="Write one on the left. A draft is stored until you send it; sending is what notifies people."
-              />
-            </div>
-          ) : (
-            <ul className="divide-y divide-ink-100">
-              {(list.data ?? []).map((row) => (
-                <li key={row.id} className="p-3.5">
-                  <div className="flex flex-wrap items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <p className="text-[0.88rem] font-semibold text-ink-900">{row.title}</p>
-                      <p className="mt-0.5 line-clamp-2 text-[0.82rem] text-ink-600">{row.body}</p>
-                    </div>
-                    <div className="flex shrink-0 flex-wrap items-center gap-1.5">
-                      <Badge tone={row.status === 'SENT' ? 'green' : row.status === 'SCHEDULED' ? 'blue' : 'neutral'}>{row.status.toLowerCase()}</Badge>
-                      {row.published ? <Badge tone="brand">public</Badge> : null}
-                    </div>
-                  </div>
-                  <p className="caption mt-1.5">
-                    {ANNOUNCEMENT_AUDIENCE_LABELS[row.audience]}
-                    {row.status === 'SENT' ? ` · ${row.recipients} recipient${row.recipients === 1 ? '' : 's'}` : ''}
-                    {row.sentAt ? ` · sent ${relativeTime(row.sentAt)}` : ` · created ${relativeTime(row.createdAt)}`}
-                  </p>
-                  <div className="mt-2.5 flex flex-wrap gap-2">
-                    <Button size="sm" variant="secondary" loading={busy === row.id} onClick={() => void resend(row)} icon={<Send className="size-3.5" aria-hidden />}>
-                      {row.status === 'SENT' ? 'Send to new people' : 'Send'}
-                    </Button>
-                    <Button size="sm" variant="ghost" loading={busy === row.id} onClick={() => void togglePublished(row)}>
-                      {row.published ? 'Hide from site' : 'Publish on site'}
-                    </Button>
-                    {actor?.role === 'ADMIN' ? (
-                      <Button size="sm" variant="ghost" loading={busy === row.id} onClick={() => void remove(row)} icon={<Trash2 className="size-3.5" aria-hidden />}>
-                        Delete
-                      </Button>
-                    ) : null}
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </Card>
       </div>
-
-      {!permissions.canAnnounce ? (
-        <div className="mt-4">
-          <NoticeState tone="warning" title="Your role cannot send announcements" compact>
-            Announcements are limited to facility supervisors and administrators.
-          </NoticeState>
-        </div>
-      ) : null}
-    </AppShell>
+    </Modal>
   );
 }
 
-export { formatDateTime };
+/** datetime-local inputs want local time, records store ISO UTC. */
+function toLocalInput(iso: string): string {
+  const date = new Date(iso);
+  const offset = date.getTimezoneOffset() * 60_000;
+  return new Date(date.getTime() - offset).toISOString().slice(0, 16);
+}

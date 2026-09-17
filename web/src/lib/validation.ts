@@ -1,16 +1,21 @@
+/**
+ * Validation schemas.
+ *
+ * One source of truth for what a form accepts. Messages are written for mothers
+ * and health workers, not developers, and every schema can return a field-keyed
+ * error map so a form can show the problem next to the input that caused it.
+ *
+ * Medical-safety note: the pregnancy and observation schemas validate *dates and
+ * numbers*. Nothing here interprets a measurement — there is no threshold in this
+ * file that produces a clinical conclusion.
+ */
+
 import { z } from 'zod';
 import { defaultCountry } from '@/config/geo';
 
-/**
- * Validation schemas shared by the browser and (via the same shapes) the API.
- * Messages are written for clinicians and patients, not developers, and every
- * schema returns a field-keyed error map for form rendering.
- */
-
 export const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i;
-/** Zambian MSISDN (097…, +26097…) plus generic international fallback. */
+/** Zambian MSISDN (097…, +26097…) plus a generic international fallback. */
 export const PHONE_PATTERN = /^(\+?\d{8,15}|0[3-9]\d{8})$/;
-export const PATIENT_ID_PATTERN = /^[A-Z]{2,4}-\d{4,8}$/;
 
 const trimmed = (min: number, max: number, label: string) =>
   z
@@ -30,493 +35,354 @@ const phoneIsValid = (value: string): boolean => PHONE_PATTERN.test(value.replac
 export const phoneField = (required = true) =>
   required
     ? z
-        .string({ error: 'Phone number is required' })
+        .string()
         .trim()
         .min(1, 'Phone number is required')
-        .refine(phoneIsValid, {
-          message: 'Enter a valid phone number, e.g. 097 1234567 or +260 97 1234567',
-        })
+        .refine(phoneIsValid, `Enter a valid phone number, for example ${defaultCountry.example}`)
     : z
         .string()
         .trim()
-        .refine((value) => value === '' || phoneIsValid(value), {
-          message: 'Enter a valid phone number, e.g. 097 1234567 or +260 97 1234567',
-        });
+        .refine((value) => value === '' || phoneIsValid(value), `Enter a valid phone number, for example ${defaultCountry.example}`);
 
 export const optionalText = (max = 400) => z.string().trim().max(max).or(z.literal(''));
 
-export const isoDate = (label: string, opts: { notFuture?: boolean; notPast?: boolean } = {}) =>
+const isBlank = (value: unknown): boolean => value === '' || value === null || value === undefined;
+
+export const isoDate = (label: string, opts: { notFuture?: boolean; notPast?: boolean; maxPastDays?: number } = {}) =>
   z
     .string()
     .trim()
     .min(1, `${label} is required`)
-    .regex(/^\d{4}-\d{2}-\d{2}$/, `${label} must be a valid date`)
+    .refine((value) => !Number.isNaN(new Date(value).getTime()), `${label} is not a valid date`)
+    .refine((value) => !opts.notFuture || new Date(value) <= endOfToday(), `${label} cannot be in the future`)
+    .refine((value) => !opts.notPast || new Date(value) >= startOfToday(), `${label} cannot be in the past`)
     .refine(
-      (v) => {
-        const d = new Date(`${v}T00:00:00`);
-        return !Number.isNaN(d.getTime());
-      },
-      { message: `${label} is not a real date` },
-    )
-    .refine((v) => (opts.notFuture ? new Date(`${v}T23:59:59`).getTime() >= Date.now() : true), {
-      message: `${label} cannot be in the past`,
-    })
-    .refine((v) => (opts.notPast ? new Date(`${v}T00:00:00`).getTime() <= Date.now() : true), {
-      message: `${label} cannot be in the future`,
-    });
+      (value) => !opts.maxPastDays || daysSince(value) <= opts.maxPastDays,
+      `${label} is more than ${opts.maxPastDays ?? 0} days ago — check the date`,
+    );
+
+const endOfToday = (): Date => {
+  const date = new Date();
+  date.setHours(23, 59, 59, 999);
+  return date;
+};
+
+const startOfToday = (): Date => {
+  const date = new Date();
+  date.setHours(0, 0, 0, 0);
+  return date;
+};
+
+const daysSince = (value: string): number => Math.floor((Date.now() - new Date(value).getTime()) / 86_400_000);
 
 export const timeField = z
   .string()
   .trim()
-  .regex(/^([01]?\d|2[0-3]):[0-5]\d$/, 'Use a 24-hour time, e.g. 09:30');
+  .min(1, 'Choose a time')
+  .regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Use the 24-hour format, for example 09:30');
 
-/**
- * Numeric clinical fields arrive as raw input strings. `blank` treats "", null
- * and undefined as "not recorded" so an empty vitals box never becomes 0.
- */
-const isBlank = (v: unknown): boolean => v === '' || v === null || v === undefined;
+export const toNumber = (value: unknown): number | undefined => (isBlank(value) ? undefined : Number(value));
 
-export const optionalNumber = (label: string, min: number, max: number) =>
-  z.custom<number | undefined>(
-    (v) => {
-      if (isBlank(v)) return true;
-      const n = Number(v);
-      return Number.isFinite(n) && n >= min && n <= max;
-    },
-    { message: `${label} must be between ${min} and ${max}` },
-  );
+/* ── Passwords ───────────────────────────────────────────────────────── */
 
-export const requiredNumber = (label: string, min: number, max: number) =>
-  z.custom<number>(
-    (v) => {
-      if (isBlank(v)) return false;
-      const n = Number(v);
-      return Number.isFinite(n) && n >= min && n <= max;
-    },
-    { message: `${label} must be a number between ${min} and ${max}` },
-  );
-
-export const toNumber = (v: unknown): number | undefined => (isBlank(v) ? undefined : Number(v));
-
-/* ── Auth ────────────────────────────────────────────────────────────── */
-
+/** Deliberately achievable: a rule nobody can follow is a rule nobody follows. */
 export const passwordPolicy = {
   minLength: 10,
-  pattern: /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).+$/,
-  message: 'Use at least 10 characters, with an uppercase letter, a lowercase letter and a number.',
+  /** A capital letter and a digit. Length is enforced separately by the schema. */
+  pattern: /^(?=.*[A-Z])(?=.*\d).+$/,
+  message: 'Use at least 10 characters, including a capital letter and a number.',
 } as const;
 
 export const passwordField = z
   .string()
   .min(passwordPolicy.minLength, passwordPolicy.message)
-  .max(64, 'Passwords must be 64 characters or fewer')
-  .refine((v) => passwordPolicy.pattern.test(v), { message: passwordPolicy.message });
+  .max(128, 'Passwords must be 128 characters or fewer')
+  .refine((value) => passwordPolicy.pattern.test(value), { message: passwordPolicy.message });
+
+/* ── Auth ────────────────────────────────────────────────────────────── */
 
 export const signInSchema = z.object({
   email: emailField,
   password: z.string().min(1, 'Enter your password'),
+  remember: z.boolean().optional(),
 });
 export type SignInValues = z.infer<typeof signInSchema>;
 
-export const registerSchema = z
-  .object({
-    fullName: trimmed(3, 80, 'Full name'),
-    email: emailField,
-    phone: phoneField(true),
-    password: passwordField,
-    confirmPassword: z.string(),
-    accountKind: z.enum(['PATIENT', 'HEALTH_WORKER']),
-    requestedRole: z.enum(['MIDWIFE', 'NURSE', 'COMMUNITY_HEALTH_WORKER', 'FACILITY_SUPERVISOR']).optional(),
-    facilityId: z.string().trim().optional(),
-    jobTitle: optionalText(60).optional(),
-    preferredLanguage: z.string().trim().min(1).default('English'),
-    /**
-     * Country of practice. Zambia is the default for this deployment; any
-     * country can be chosen so the platform stays usable internationally.
-     */
-    country: z.string().trim().min(2).max(3).default(defaultCountry.code),
-    acceptTerms: z.literal(true, { error: 'You must accept the terms and privacy notice to continue' }),
-    acceptMarketing: z.boolean().optional(),
-  })
-  .refine((v) => v.password === v.confirmPassword, {
-    message: 'Passwords do not match',
-    path: ['confirmPassword'],
-  })
-  .refine((v) => (v.accountKind === 'HEALTH_WORKER' ? Boolean(v.facilityId) : true), {
-    message: 'Select the facility you work at',
-    path: ['facilityId'],
-  });
-export type RegisterValues = z.infer<typeof registerSchema>;
-
 export const forgotPasswordSchema = z.object({ email: emailField });
 export type ForgotPasswordValues = z.infer<typeof forgotPasswordSchema>;
-
-export const resetPasswordSchema = z
-  .object({
-    newPassword: passwordField,
-    confirmPassword: z.string(),
-  })
-  .refine((v) => v.newPassword === v.confirmPassword, {
-    message: 'Passwords do not match',
-    path: ['confirmPassword'],
-  });
-export type ResetPasswordValues = z.infer<typeof resetPasswordSchema>;
 
 export const changePasswordSchema = z
   .object({
     currentPassword: z.string().min(1, 'Enter your current password'),
     newPassword: passwordField,
-    confirmPassword: z.string(),
+    confirmPassword: z.string().min(1, 'Confirm your new password'),
   })
-  .refine((v) => v.newPassword === v.confirmPassword, {
-    message: 'Passwords do not match',
+  .refine((value) => value.newPassword === value.confirmPassword, {
+    message: 'The two passwords do not match',
     path: ['confirmPassword'],
-  })
-  .refine((v) => v.currentPassword !== v.newPassword, {
-    message: 'Choose a password you have not used before',
-    path: ['newPassword'],
   });
+export type ChangePasswordValues = z.infer<typeof changePasswordSchema>;
 
-export const profileUpdateSchema = z.object({
-  fullName: trimmed(3, 80, 'Full name'),
+/* ── Profile ─────────────────────────────────────────────────────────── */
+
+export const profileSchema = z.object({
+  fullName: trimmed(2, 120, 'Full name'),
   phone: phoneField(false),
-  title: optionalText(60),
-  licenseNumber: optionalText(40),
-  preferredLanguage: z.string().trim().min(1).optional(),
+  dateOfBirth: z.string().trim().optional().or(z.literal('')),
+  country: z.string().min(2, 'Select your country'),
+  language: z.enum(['en', 'bem', 'ny', 'toi', 'loz']),
+  emergencyName: optionalText(120),
+  emergencyPhone: z.string().trim().optional().or(z.literal('')),
+  emergencyRelationship: optionalText(60),
 });
-export type ProfileUpdateValues = z.infer<typeof profileUpdateSchema>;
+export type ProfileValues = z.infer<typeof profileSchema>;
 
-export const adminCreateUserSchema = z
+/* ── Pregnancy setup ─────────────────────────────────────────────────── */
+
+export const pregnancySetupSchema = z
   .object({
-    fullName: trimmed(3, 80, 'Full name'),
-    email: emailField,
-    phone: phoneField(true),
-    role: z.enum(['MIDWIFE', 'NURSE', 'COMMUNITY_HEALTH_WORKER', 'FACILITY_SUPERVISOR', 'ADMIN']),
-    facilityId: z.string().trim().min(1, 'Select a facility'),
-    jobTitle: optionalText(60),
-    temporaryPassword: passwordField,
-    note: optionalText(240),
+    lmpDate: z.string().trim().optional().or(z.literal('')),
+    eddDate: z.string().trim().optional().or(z.literal('')),
+    datingMethod: z.enum(['lmp', 'ultrasound', 'clinician', 'unknown']),
+    previousPregnancies: z.coerce.number().int().min(0).max(20).default(0),
+    previousLiveBirths: z.coerce.number().int().min(0).max(20).default(0),
+    facilityId: z.string().trim().optional().or(z.literal('')),
   })
-  /**
-   * The role selector exists for administrators only. The server ignores any
-   * role that the caller is not entitled to grant, and ADMIN requires an
-   * existing ADMIN (or the deployed allow-list) — a request can never
-   * self-promote.
-   */
-  .refine(() => true);
-
-/* ── Facility ────────────────────────────────────────────────────────── */
-
-export const systemSettingsSchema = z.object({
-  patientIdPrefix: z
-    .string()
-    .trim()
-    .min(1, 'A prefix is required')
-    .max(6, 'Keep the prefix short')
-    .regex(/^[A-Z]+$/, 'Use upper-case letters, e.g. MC'),
-  reminderDaysDefault: z.array(z.number().int().min(0).max(60)).min(1, 'Pick at least one reminder offset').max(4),
-  smsEnabled: z.boolean(),
-  pushEnabled: z.boolean(),
-  registrationRequiresApproval: z.boolean(),
-  allowPatientAccountSelfRegistration: z.boolean(),
-  defaultLanguage: z.string().trim().min(2, 'Select a language'),
-  dataRetentionPolicy: optionalText(240),
-  clinicalRulesReviewedBy: optionalText(120),
-  clinicalRulesReviewedAt: z.string().optional(),
-});
-export type SystemSettingsValues = z.infer<typeof systemSettingsSchema>;
-
-export const facilitySchema = z.object({
-  name: trimmed(3, 90, 'Facility name'),
-  code: z.string().trim().min(2).max(12),
-  type: z.enum([
-    'DISTRICT_HOSPITAL',
-    'PROVINCIAL_HOSPITAL',
-    'HEALTH_CENTRE',
-    'CLINIC',
-    'MATERNITY_HOME',
-    'HEALTH_POST',
-  ]),
-  district: trimmed(2, 60, 'District'),
-  province: trimmed(2, 60, 'Province'),
-  address: optionalText(180),
-  phone: phoneField(false),
-  email: z.string().trim().optional(),
-  referralToFacilityId: z.string().trim().optional(),
-  bedCount: z.coerce.number().int().min(0).max(5000).optional(),
-  hasMaternityWard: z.boolean().default(true),
-  hasUltrasound: z.boolean().default(false),
-  hasLaboratory: z.boolean().default(false),
-  active: z.boolean().default(true),
-});
-export type FacilityValues = z.infer<typeof facilitySchema>;
-
-/* ── Mother registration ─────────────────────────────────────────────── */
-
-export const motherSchema = z
-  .object({
-    fullName: trimmed(3, 80, 'Full name'),
-    dateOfBirth: z.string().trim().optional(),
-    ageYears: z.coerce
-      .number()
-      .int('Age must be a whole number')
-      .refine((v) => Number.isNaN(v) || (v >= 10 && v <= 60), { message: 'Age must be between 10 and 60' })
-      .optional(),
-    phone: phoneField(true),
-    alternatePhone: phoneField(false),
-    address: optionalText(200),
-    community: trimmed(2, 80, 'Community / area'),
-    chiefName: optionalText(60),
-    landmark: optionalText(120),
-    emergencyName: optionalText(70),
-    emergencyRelation: optionalText(40),
-    emergencyPhone: phoneField(false),
-    preferredLanguage: z.string().trim().min(1, 'Select a language'),
-    literacyLevel: z.enum(['NONE', 'PRIMARY', 'SECONDARY', 'TERTIARY']).optional(),
-    maritalStatus: z.enum(['SINGLE', 'MARRIED', 'COHABITING', 'DIVORCED', 'WIDOWED']).optional(),
-    occupation: optionalText(60),
-    husbandName: optionalText(70),
-    husbandPhone: phoneField(false),
-    bloodGroup: optionalText(6),
-    allergies: optionalText(240),
-    chronicConditions: z.array(z.string()).default([]),
-    registrationFacilityId: z.string().trim().min(1, 'Select a facility'),
-    assignedChwUserId: z.string().trim().optional(),
-    catchmentArea: optionalText(40),
-    consentAccepted: z.literal(true, { error: 'Consent must be recorded before a patient can be registered' }),
-  })
-  .refine(
-    (v) => {
-      if (!v.dateOfBirth) return true;
-      const dob = new Date(v.dateOfBirth);
-      return !Number.isNaN(dob.getTime()) && dob < new Date();
-    },
-    { message: 'Date of birth must be in the past', path: ['dateOfBirth'] },
-  );
-export type MotherValues = z.infer<typeof motherSchema>;
-
-export const pregnancySchema = z
-  .object({
-    gravida: z.coerce.number().int().min(1, 'Gravida must be at least 1').max(20, 'Check the entered value'),
-    para: z.coerce.number().int().min(0).max(20).optional().default(0),
-    livingChildren: z.coerce.number().int().min(0).max(20).optional(),
-    lmpDate: z.string().trim().optional(),
-    eddDate: z.string().trim().optional(),
-    datingMethod: z.enum(['LMP', 'ULTRASOUND', 'CLINICAL']).default('LMP'),
-    confirmedAt: z.string().trim().optional(),
-    gestationalWeeks: z.coerce.number().int().min(0).max(45).optional(),
-    gestationalDays: z.coerce.number().int().min(0).max(6).optional(),
-    previousCesarean: z.boolean().default(false),
-    gestationCount: z.union([z.literal(1), z.literal(2), z.literal(3)]).default(1),
-    previousComplications: z.array(z.string()).default([]),
-    riskFactors: z.array(z.string()).default([]),
-    notes: optionalText(600),
-  })
-  .refine((v) => Boolean(v.lmpDate) || Boolean(v.eddDate) || Boolean(v.gestationalWeeks), {
-    message: 'Provide the LMP, an EDD, or a measured gestational age',
+  .refine((value) => Boolean(value.lmpDate || value.eddDate), {
+    message: 'Enter your last menstrual period or your due date',
     path: ['lmpDate'],
   })
-  .refine((v) => (v.para ?? 0) <= (v.gravida ?? 1), {
-    message: 'Para cannot be greater than Gravida',
-    path: ['para'],
+  .refine((value) => !value.lmpDate || daysSince(value.lmpDate) <= 320, {
+    message: 'That date is more than 45 weeks ago — check it',
+    path: ['lmpDate'],
+  })
+  .refine((value) => !value.lmpDate || daysSince(value.lmpDate) >= -14, {
+    message: 'The last menstrual period cannot be in the future',
+    path: ['lmpDate'],
+  })
+  .refine((value) => !value.eddDate || daysSince(value.eddDate) <= 320, {
+    message: 'That due date is too far in the past — check it',
+    path: ['eddDate'],
+  })
+  .refine((value) => !value.eddDate || daysSince(value.eddDate) >= -320, {
+    message: 'That due date is too far in the future — check it',
+    path: ['eddDate'],
   })
   .refine(
-    (v) => {
-      if (!v.lmpDate) return true;
-      const lmp = new Date(v.lmpDate).getTime();
-      return Number.isNaN(lmp) || lmp <= Date.now();
-    },
-    { message: 'LMP cannot be in the future', path: ['lmpDate'] },
+    (value) => !value.lmpDate || !value.eddDate || new Date(value.eddDate) > new Date(value.lmpDate),
+    { message: 'The due date must be after the last menstrual period', path: ['eddDate'] },
   );
-export type PregnancyValues = z.infer<typeof pregnancySchema>;
+export type PregnancySetupValues = z.infer<typeof pregnancySetupSchema>;
 
-/* ── ANC visit ─────────────────────────────────────────────────────────── */
+/* ── Appointments ────────────────────────────────────────────────────── */
 
-export const ancVisitSchema = z
+export const appointmentSchema = z.object({
+  kind: z.enum(['antenatal', 'postnatal', 'baby', 'immunization', 'lab', 'other']),
+  date: isoDate('Appointment date', { notPast: true }),
+  time: z.string().trim().optional().or(z.literal('')),
+  facilityName: trimmed(2, 120, 'Facility'),
+  facilityId: z.string().trim().optional().or(z.literal('')),
+  purpose: trimmed(3, 200, 'Purpose'),
+  babyId: z.string().trim().optional().or(z.literal('')),
+  questions: optionalText(1000),
+  sharedWithSupporter: z.boolean().optional(),
+});
+export type AppointmentValues = z.infer<typeof appointmentSchema>;
+
+/* ── Reminders ───────────────────────────────────────────────────────── */
+
+export const reminderSchema = z
   .object({
-    visitDate: isoDate('Visit date', { notPast: true }),
-    visitType: z.enum(['BOOKING', 'ROUTINE', 'FOLLOW_UP', 'URGENT', 'REVIEW', 'PMTCT', 'ULTRASOUND']),
-    reasonForVisit: optionalText(240),
-    gestationalWeeks: z.coerce.number().int().min(0).max(45).optional(),
-    gestationalDays: z.coerce.number().int().min(0).max(6).optional(),
-
-    bloodPressure: z
-      .string()
-      .trim()
-      .optional()
-      .refine((v) => !v || /^\d{2,3}\s*\/\s*\d{2,3}$/.test(v), {
-        message: 'Enter blood pressure as systolic/diastolic, e.g. 124/78',
-      })
-      .refine((v) => {
-        if (!v) return true;
-        const [sys = 0, dia = 0] = v.split('/').map((s) => Number(s.trim()));
-        return sys >= 60 && sys <= 260 && dia >= 30 && dia <= 180 && sys > dia;
-      }, { message: 'Check the blood pressure values (e.g. 90–260 over 40–180, systolic above diastolic)' }),
-
-    pulse: optionalNumber('Pulse', 30, 220),
-    temperatureC: optionalNumber('Temperature', 30, 43),
-    respiratoryRate: optionalNumber('Respiratory rate', 6, 60),
-    weightKg: optionalNumber('Weight', 25, 250),
-    heightCm: optionalNumber('Height', 120, 220),
-    muacCm: optionalNumber('MUAC', 10, 45),
-    fundalHeightCm: optionalNumber('Fundal height', 4, 60),
-    fetalHeartRate: optionalNumber('Fetal heart rate', 50, 220),
-    oedema: z.enum(['NONE', 'MILD', 'SEVERE']).optional(),
-    urineProtein: z.enum(['NONE', 'TRACE', 'PLUS_1', 'PLUS_2', 'PLUS_3']).optional(),
-    urineGlucose: z.enum(['NONE', 'TRACE', 'PLUS_1', 'PLUS_2', 'PLUS_3']).optional(),
-    haemoglobinGdl: optionalNumber('Haemoglobin', 2, 22),
-    bloodGlucoseMmoll: optionalNumber('Blood glucose', 1, 40),
-    presentation: z.enum(['VERTEX', 'BREECH', 'TRANSVERSE', 'UNDETERMINED']).optional(),
-
-    dangerSigns: z.array(z.string()).default([]),
-    otherDangerSignNote: optionalText(300),
-    noneReported: z.boolean().default(false),
-
-    note: optionalText(1200),
-    counselling: z.array(z.string()).default([]),
-    outcome: z
-      .enum(['CONTINUE_CARE', 'REFERRED', 'ADMITTED', 'LOST_TO_FOLLOWUP', 'DELIVERED'])
-      .optional(),
-    nextAppointmentDate: z.string().trim().optional(),
+    kind: z.enum(['medication', 'supplement', 'custom']),
+    title: trimmed(2, 120, 'Reminder name'),
+    medicine: optionalText(120),
+    dose: optionalText(80),
+    times: z.array(z.string()).min(1, 'Choose at least one time'),
+    frequency: z.enum(['daily', 'weekdays', 'weekly', 'specific-days', 'once']),
+    daysOfWeek: z.array(z.number().int().min(0).max(6)),
+    startDate: isoDate('Start date', { notPast: false }),
+    endDate: z.string().trim().optional().or(z.literal('')),
+    prescribedBy: optionalText(120),
+    instructions: optionalText(400),
+    sharedWithSupporter: z.boolean().optional(),
   })
-  .refine((v) => v.dangerSigns.length > 0 || v.noneReported, {
-    message: 'Record the danger-sign screening: select at least one sign, or “None reported”',
-    path: ['dangerSigns'],
+  .refine((value) => value.frequency !== 'specific-days' || value.daysOfWeek.length > 0, {
+    message: 'Choose which days this reminder repeats on',
+    path: ['daysOfWeek'],
   })
-  .refine(
-    (v) =>
-      v.dangerSigns.length === 0 || !v.dangerSigns.includes('OTHER_CONCERN') || Boolean(v.otherDangerSignNote),
-    {
-      message: 'Describe the other concerning symptom',
-      path: ['otherDangerSignNote'],
-    },
-  )
-  .refine((v) => !v.nextAppointmentDate || !Number.isNaN(new Date(v.nextAppointmentDate).getTime()), {
-    message: 'Next appointment date is invalid',
-    path: ['nextAppointmentDate'],
+  .refine((value) => !value.endDate || new Date(value.endDate) >= new Date(value.startDate), {
+    message: 'The end date must be on or after the start date',
+    path: ['endDate'],
   });
-export type AncVisitValues = z.infer<typeof ancVisitSchema>;
+export type ReminderValues = z.infer<typeof reminderSchema>;
 
+/* ── Baby ────────────────────────────────────────────────────────────── */
+
+export const babySchema = z.object({
+  name: trimmed(1, 80, 'Baby name'),
+  dateOfBirth: isoDate('Date of birth', { notFuture: true, maxPastDays: 6570 }),
+  sex: z.enum(['female', 'male', 'undisclosed']),
+  birthWeightKg: z.coerce.number().min(0.3).max(8).optional(),
+  birthLengthCm: z.coerce.number().min(20).max(70).optional(),
+  headCircumferenceCm: z.coerce.number().min(15).max(50).optional(),
+  birthFacilityId: z.string().trim().optional().or(z.literal('')),
+  birthNotes: optionalText(500),
+});
+export type BabyValues = z.infer<typeof babySchema>;
+
+/* ── Journal ─────────────────────────────────────────────────────────── */
+
+export const journalSchema = z.object({
+  date: isoDate('Entry date', { notFuture: true }),
+  title: trimmed(1, 120, 'Title'),
+  body: trimmed(1, 8000, 'Entry'),
+  mood: z.enum(['great', 'good', 'okay', 'low', 'struggling']).optional().or(z.literal('')),
+  tags: optionalText(120),
+  babyId: z.string().trim().optional().or(z.literal('')),
+});
+export type JournalValues = z.infer<typeof journalSchema>;
+
+/* ── Observations (recorded, never interpreted) ───────────────────────── */
+
+export const observationSchema = z.object({
+  kind: z.enum(['blood-pressure', 'weight', 'height', 'hb', 'glucose', 'fundal-height', 'symptom', 'fetal-movement', 'mood', 'other']),
+  label: trimmed(2, 80, 'What you measured'),
+  value: z.string().trim().min(1, 'Enter the reading').max(40),
+  unit: optionalText(20),
+  notes: optionalText(400),
+  recordedBy: z.enum(['self', 'provider']),
+  appointmentId: z.string().trim().optional().or(z.literal('')),
+});
+export type ObservationValues = z.infer<typeof observationSchema>;
+
+/** Splits "120/80" — validation only; no interpretation of the result. */
 export const parseBloodPressure = (value?: string | null): { systolic: number; diastolic: number } | null => {
   if (!value) return null;
-  const match = value.trim().match(/^(\d{2,3})\s*\/\s*(\d{2,3})$/);
+  const match = /^\s*(\d{2,3})\s*[/|]\s*(\d{2,3})\s*$/.exec(value);
   if (!match) return null;
   return { systolic: Number(match[1]), diastolic: Number(match[2]) };
 };
 
-/* ── Appointments / alerts / referrals ───────────────────────────────── */
+/* ── Facilities (admin / facility administrator) ─────────────────────── */
 
-export const appointmentSchema = z.object({
-  motherId: z.string().trim().min(1, 'Select a patient'),
-  scheduledFor: isoDate('Appointment date', { notFuture: false }),
-  time: timeField,
-  facilityId: z.string().trim().min(1, 'Select a facility'),
+export const facilitySchema = z.object({
+  name: trimmed(3, 140, 'Facility name'),
   type: z.enum([
-    'ANC',
-    'FOLLOW_UP',
-    'REVIEW',
-    'LABORATORY',
-    'ULTRASOUND',
-    'PMTCT',
-    'IMMUNISATION',
-    'POSTNATAL',
-    'OTHER',
+    'government-hospital',
+    'private-hospital',
+    'clinic',
+    'health-post',
+    'maternity-home',
+    'pharmacy',
+    'laboratory',
   ]),
-  durationMinutes: z.coerce.number().int().min(5).max(240).default(30),
-  assignedUserId: z.string().trim().optional(),
-  reason: optionalText(240),
-  notes: optionalText(600),
-  reminderDays: z.array(z.number()).default([7, 1]),
-  smsEnabled: z.boolean().default(true),
+  address: trimmed(3, 240, 'Address'),
+  city: trimmed(2, 80, 'City or town'),
+  province: trimmed(2, 80, 'Province'),
+  country: z.string().min(2),
+  phone: z.string().trim().optional().or(z.literal('')),
+  emergencyPhone: z.string().trim().optional().or(z.literal('')),
+  latitude: z.coerce.number().min(-90).max(90).optional(),
+  longitude: z.coerce.number().min(-180).max(180).optional(),
+  openingHours: trimmed(2, 200, 'Opening hours'),
+  hasMaternity: z.boolean(),
+  has24HourEmergency: z.boolean(),
+  services: z.array(z.string()),
+  maternalServices: z.array(z.string()),
+  active: z.boolean(),
 });
-export type AppointmentValues = z.infer<typeof appointmentSchema>;
+export type FacilityValues = z.infer<typeof facilitySchema>;
 
-export const appointmentStatusSchema = z.enum([
-  'SCHEDULED',
-  'CONFIRMED',
-  'COMPLETED',
-  'MISSED',
-  'CANCELLED',
-  'RESCHEDULED',
-]);
+/* ── Provider registration and directory ─────────────────────────────── */
 
-export const alertSchema = z.object({
-  motherId: z.string().trim().min(1, 'Select a patient'),
-  level: z.enum(['RED', 'AMBER']),
+export const providerRegistrationSchema = z.object({
+  fullName: trimmed(2, 120, 'Full name'),
+  title: optionalText(60),
+  profession: z.enum(['midwife', 'nurse', 'doctor', 'maternal-educator', 'community-health-worker', 'pharmacist']),
+  facilityId: z.string().trim().optional().or(z.literal('')),
+  facilityName: trimmed(2, 140, 'Facility'),
+  licenseNumber: optionalText(60),
+  languages: optionalText(160),
+  bio: optionalText(800),
+  phone: phoneField(false),
+});
+export type ProviderRegistrationValues = z.infer<typeof providerRegistrationSchema>;
+
+/* ── Articles ────────────────────────────────────────────────────────── */
+
+export const articleSchema = z.object({
+  title: trimmed(6, 140, 'Title'),
+  summary: trimmed(20, 320, 'Summary'),
   category: z.enum([
-    'DANGER_SIGN',
-    'BLOOD_PRESSURE',
-    'VITALS',
-    'FETAL',
-    'INFECTION',
-    'NUTRITION',
-    'LABORATORY',
-    'RISK_PROFILE',
-    'MISSED_VISIT',
-    'OTHER',
+    'pregnancy',
+    'nutrition',
+    'antenatal-care',
+    'activity',
+    'rest',
+    'wellbeing',
+    'labour',
+    'postnatal',
+    'newborn',
+    'breastfeeding',
+    'immunization',
   ]),
-  title: trimmed(4, 90, 'Title'),
-  message: trimmed(10, 600, 'Clinical note'),
-  assignedUserId: z.string().trim().optional(),
+  audience: z.enum(['public', 'mother', 'provider']),
+  language: z.enum(['en', 'bem', 'ny', 'toi', 'loz']),
+  weekNumber: z.coerce.number().int().min(1).max(42).optional(),
+  tags: optionalText(160),
+  blocks: z.array(z.unknown()).min(1, 'Add at least one section of content'),
 });
-export type AlertValues = z.infer<typeof alertSchema>;
+export type ArticleValues = z.infer<typeof articleSchema>;
 
-export const alertActionSchema = z.object({
-  status: z.enum(['ACKNOWLEDGED', 'ASSESSED', 'REFERRED', 'FOLLOW_UP_REQUIRED', 'RESOLVED']),
-  note: z.string().trim().min(3, 'Add a short action note').max(600),
-  followUpDate: z.string().trim().optional(),
-  createReferral: z.boolean().default(false),
+/* ── Family support and care sharing ─────────────────────────────────── */
+
+export const supporterInviteSchema = z.object({
+  supporterName: trimmed(2, 120, 'Their name'),
+  supporterEmail: emailField,
+  relationship: trimmed(2, 60, 'Relationship'),
+  appointments: z.boolean(),
+  reminders: z.boolean(),
+  education: z.boolean(),
+  milestones: z.boolean(),
 });
+export type SupporterInviteValues = z.infer<typeof supporterInviteSchema>;
 
-export const referralSchema = z.object({
-  motherId: z.string().trim().min(1, 'Select a patient'),
-  reason: trimmed(6, 300, 'Reason for referral'),
-  clinicalQuestion: optionalText(300),
-  urgency: z.enum(['EMERGENCY', 'URGENT', 'ROUTINE']),
-  scheduledAt: isoDate('Date'),
-  time: timeField,
-  originFacilityId: z.string().trim().min(1, 'Select the referring facility'),
-  receivingFacilityId: z.string().trim().min(1, 'Select the receiving facility'),
-  transport: z.enum(['AMBULANCE', 'PRIVATE_CAR', 'OTHER', 'NONE']),
-  transportNote: optionalText(160),
-  clinicalNotes: z.string().trim().min(10, 'Summarise the clinical situation (at least 10 characters)').max(2500),
+export const careRequestSchema = z.object({
+  motherUserId: z.string().min(1, 'Choose the patient'),
+  note: optionalText(300),
 });
-export type ReferralValues = z.infer<typeof referralSchema>;
+export type CareRequestValues = z.infer<typeof careRequestSchema>;
 
-export const referralStatusSchema = z.enum([
-  'ACTIVE',
-  'RECEIVED',
-  'ASSESSMENT_COMPLETED',
-  'TREATMENT',
-  'ADMISSION',
-  'DISCHARGED',
-  'REFERRED_ONWARD',
-  'FOLLOW_UP_REQUIRED',
-  'CLOSED',
-]);
+/* ── Feedback ────────────────────────────────────────────────────────── */
 
-/* ── Documents ───────────────────────────────────────────────────────── */
+export const feedbackSchema = z.object({
+  email: z.string().trim().optional().or(z.literal('')),
+  topic: z.enum(['bug', 'content', 'feature', 'facility-data', 'other']),
+  message: trimmed(10, 4000, 'Message'),
+});
+export type FeedbackValues = z.infer<typeof feedbackSchema>;
 
-export const DOCUMENT_ACCEPTED_MIME = [
-  'application/pdf',
-  'image/png',
-  'image/jpeg',
-  'image/webp',
-  'image/heic',
-  'text/plain',
-];
+/* ── Settings ────────────────────────────────────────────────────────── */
+
+export const settingsSchema = z.object({
+  registrationOpen: z.boolean(),
+  providerApprovalsRequired: z.boolean(),
+  defaultCountry: z.string().min(2),
+  supportEmail: emailField,
+  supportPhone: z.string().trim().optional().or(z.literal('')),
+  immunizationScheduleLabel: trimmed(4, 120, 'Immunization schedule label'),
+  contentReviewReminderDays: z.coerce.number().int().min(30).max(1825),
+  maintenanceMessage: optionalText(400),
+});
+export type SettingsValues = z.infer<typeof settingsSchema>;
+
+/* ── Files ───────────────────────────────────────────────────────────── */
+
+export const DOCUMENT_ACCEPTED_MIME = ['application/pdf', 'image/png', 'image/jpeg', 'image/webp', 'image/heic', 'text/plain'];
 export const MAX_DOCUMENT_BYTES = 15 * 1024 * 1024;
 export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
-/** Images only — used by the media uploader, which must not accept PDF/TXT. */
+/** Images only — the media uploader must not accept PDF/TXT. */
 export const IMAGE_ACCEPTED_MIME = ['image/png', 'image/jpeg', 'image/webp', 'image/heic'];
-
-export const documentMetaSchema = z.object({
-  name: trimmed(3, 120, 'Document name'),
-  category: z.enum(['REPORT', 'MEDICAL', 'REFERRAL', 'FACILITY', 'EDUCATION', 'CONSENT', 'LABORATORY', 'OTHER']),
-  description: optionalText(400),
-  motherId: z.string().trim().optional(),
-  facilityId: z.string().trim().optional(),
-});
 
 export function validateFile(
   file: { name: string; type: string; size: number },
@@ -525,7 +391,7 @@ export function validateFile(
   return validateFileImpl(file, opts);
 }
 
-/** Kept as a function so it can be unit-tested without a DOM File constructor. */
+/** Kept as a separate function so it can be unit-tested without a DOM File. */
 function validateFileImpl(
   file: { name: string; type: string; size: number },
   opts: { accept?: string[]; maxBytes?: number },
@@ -545,29 +411,6 @@ function validateFileImpl(
 }
 
 export { validateFileImpl as validateFileLike };
-
-/* ── Education ───────────────────────────────────────────────────────── */
-
-export const educationSchema = z.object({
-  title: trimmed(6, 120, 'Title'),
-  summary: trimmed(20, 320, 'Summary'),
-  body: trimmed(40, 12000, 'Content'),
-  language: z.string().trim().min(1, 'Select a language'),
-  topics: z.array(z.string()).min(1, 'Select at least one topic'),
-  audience: z.array(z.enum(['MOTHER', 'HEALTH_WORKER'])).min(1, 'Select an audience'),
-  stage: z.enum([
-    'PRECONCEPTION',
-    'FIRST_TRIMESTER',
-    'SECOND_TRIMESTER',
-    'THIRD_TRIMESTER',
-    'LABOUR',
-    'POSTNATAL',
-    'FAMILY_PLANNING',
-    'GENERAL',
-  ]),
-  status: z.enum(['DRAFT', 'PUBLISHED']),
-  facilityId: z.string().trim().optional(),
-});
 
 /* ── Helpers ─────────────────────────────────────────────────────────── */
 

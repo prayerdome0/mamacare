@@ -1,347 +1,492 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
-import { KeyRound, RefreshCw, Search, UserPlus, Users } from 'lucide-react';
-import { AppShell } from '@/components/layout/shell';
-import { Card } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Badge, EmptyState, ErrorState, NoticeState } from '@/components/ui/display';
-import { DataTable, type Column } from '@/components/ui/table';
-import { Field, SearchInput, Select, TextInput } from '@/components/ui/form';
-import { useAsync, useDebouncedValue } from '@/hooks';
-import { useToast } from '@/components/ui/toast';
-import { services } from '@/services/session-store';
-import { createStaffAccount, listUsers, requestPasswordResetFor, setUserStatus, type UserDirectoryRow } from '@/services/admin/user-admin';
-import { adminCreateUserSchema } from '@/lib/validation';
-import { ROLE_LABELS, type AccountStatus, type Role } from '@/types/domain';
-import { relativeTime } from '@/lib/utils';
-import { useForm } from '@/hooks/use-form';
-import { FormDialog } from '@/components/forms/form-dialog';
-
 /**
- * The user directory. Every write here goes through the privileged service,
- * which requires an administrator, records a reason and bumps the account's
- * privilege version so the affected session loses access on its next token
- * refresh.
+ * Administrator — accounts.
+ *
+ * Every account on the deployment with the two controls that actually matter:
+ * role and status. Role changes are logged and take effect at the next sign-in,
+ * because claims live in the token. Status changes are immediate: a suspended
+ * account cannot read or write anything, and the person sees why.
+ *
+ * Deleting is deliberately unhelpful. A closed account is reversible; removing the
+ * profile row leaves the person's health records behind unless they deleted them
+ * first from their own Settings screen, and the page says so before you confirm.
  */
-export default function AdminUsersPage() {
-  const [params, setParams] = useSearchParams();
-  const toast = useToast();
-  const [term, setTerm] = useState(params.get('search') ?? '');
-  const [role, setRole] = useState<Role | 'ALL'>((params.get('role') as Role | null) ?? 'ALL');
-  const [status, setStatus] = useState<AccountStatus | 'ALL'>((params.get('status') as AccountStatus | null) ?? 'ALL');
-  const [facilityId, setFacilityId] = useState(params.get('facilityId') ?? '');
-  const [creating, setCreating] = useState(false);
-  const [busy, setBusy] = useState<string | null>(null);
-  const search = useDebouncedValue(term, 300);
 
-  const facilities = useAsync(() => services().data.allFacilities(), {});
-  const directory = useAsync(
-    () => listUsers({ search: search || undefined, role, status, facilityId: facilityId || null }),
-    { deps: [search, role, status, facilityId] },
-  );
+import { useEffect, useMemo, useState } from 'react';
+import {
+  Download,
+  Mail,
+  RefreshCw,
+  Search,
+  ShieldAlert,
+  ShieldCheck,
+  Trash2,
+  UserCog,
+  Users,
+} from 'lucide-react';
+import { useAsync } from '@/hooks';
+import { profileRepo } from '@/services/repositories';
+import { logAudit } from '@/services/audit';
+import { useConfirm, useSession } from '@/providers/app-providers';
+import { downloadBlob, formatDate, relativeTime, toCsv, toIsoDate } from '@/lib/utils';
+import {
+  ACCOUNT_STATUS_LABELS,
+  ROLES,
+  ROLE_LABELS,
+  type AccountStatus,
+  type Role,
+  type UserProfile,
+} from '@/types/domain';
+import { StaffPageHeader, StaffShell } from '@/components/layout/staff-shell';
+import { Button } from '@/components/ui/button';
+import { Card, KeyValue, SectionHeading, StatCard } from '@/components/ui/card';
+import { Avatar, Badge, EmptyState, ErrorState, LoadingRows } from '@/components/ui/display';
+import { Field, SearchInput, Select, TextArea } from '@/components/ui/form';
+import { Modal } from '@/components/ui/overlay';
+import { DataTable, type Column } from '@/components/ui/table';
+import { useToast } from '@/components/ui/toast';
+
+type RoleFilter = Role | 'ALL';
+type StatusFilter = AccountStatus | 'ALL';
+
+export default function AdminUsers() {
+  const { actor } = useSession();
+  const toast = useToast();
+  const confirm = useConfirm();
+  const [search, setSearch] = useState('');
+  const [roleFilter, setRoleFilter] = useState<RoleFilter>('ALL');
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('ALL');
+  const [selected, setSelected] = useState<UserProfile | null>(null);
+
+  const { data, loading, error, retryable, run } = useAsync(() => profileRepo.list(1000), { immediate: true });
+  const users = useMemo<UserProfile[]>(() => data?.rows ?? [], [data]);
+
+  const filtered = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    return users.filter((user) => {
+      if (roleFilter !== 'ALL' && user.role !== roleFilter) return false;
+      if (statusFilter !== 'ALL' && user.status !== statusFilter) return false;
+      if (!term) return true;
+      return [user.fullName, user.email, user.phone ?? '', user.country].join(' ').toLowerCase().includes(term);
+    });
+  }, [users, search, roleFilter, statusFilter]);
+
+  const counts = useMemo(() => {
+    const byStatus = users.reduce<Record<string, number>>((acc, user) => {
+      acc[user.status] = (acc[user.status] ?? 0) + 1;
+      return acc;
+    }, {});
+    return {
+      total: users.length,
+      mothers: users.filter((user) => user.role === 'MOTHER').length,
+      staff: users.filter((user) => ['PROVIDER', 'FACILITY_ADMIN', 'ADMIN'].includes(user.role)).length,
+      suspended: byStatus.SUSPENDED ?? 0,
+      pending: byStatus.PENDING_APPROVAL ?? 0,
+      neverSignedIn: users.filter((user) => !user.lastLoginAt).length,
+    };
+  }, [users]);
 
   useEffect(() => {
-    const next = new URLSearchParams();
-    if (search) next.set('search', search);
-    if (role !== 'ALL') next.set('role', role);
-    if (status !== 'ALL') next.set('status', status);
-    if (facilityId) next.set('facilityId', facilityId);
-    setParams(next, { replace: true });
-  }, [search, role, status, facilityId, setParams]);
+    document.title = 'Accounts · Mama Care admin';
+  }, []);
 
-  const rows = useMemo(() => directory.data?.rows ?? [], [directory.data]);
-
-  const suspend = async (row: UserDirectoryRow, next: AccountStatus) => {
-    setBusy(row.id);
-    try {
-      await setUserStatus(row.id, next, next === 'SUSPENDED' ? 'Suspended from the admin directory.' : 'Reinstated from the admin directory.');
-      toast.success(next === 'SUSPENDED' ? 'Account suspended' : 'Account reactivated', `${row.fullName} · ${next === 'SUSPENDED' ? 'locked out immediately' : 'can sign in again'}.`);
-      void directory.run();
-    } catch (error) {
-      toast.error(error, 'The account could not be updated');
-    } finally {
-      setBusy(null);
-    }
+  const exportCsv = async (): Promise<void> => {
+    const csv = toCsv(
+      ['Name', 'Email', 'Phone', 'Role', 'Status', 'Country', 'Language', 'Joined', 'Last login'],
+      filtered.map((user) => [
+        user.fullName,
+        user.email,
+        user.phone ?? '',
+        ROLE_LABELS[user.role],
+        ACCOUNT_STATUS_LABELS[user.status],
+        user.country,
+        user.language,
+        user.createdAt,
+        user.lastLoginAt ?? '',
+      ]),
+    );
+    downloadBlob(new Blob([csv], { type: 'text/csv;charset=utf-8' }), `mamacare-accounts-${toIsoDate(new Date())}.csv`);
+    await logAudit('data-export', 'users', actor?.uid ?? null, `Exported ${filtered.length} accounts`);
+    toast.success('Export ready', 'This file contains personal data. Store it like a clinical record and delete it when you are done.');
   };
 
-  const reset = async (row: UserDirectoryRow) => {
-    setBusy(row.id);
-    try {
-      const result = await requestPasswordResetFor(row.id);
-      toast.info('Reset handled', result.message);
-    } catch (error) {
-      toast.error(error, 'The reset could not be sent');
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const columns: Column<UserDirectoryRow>[] = [
+  const columns: Column<UserProfile>[] = [
     {
-      key: 'person',
+      key: 'name',
       header: 'Account',
-      render: (row) => (
-        <div className="flex items-start gap-2.5">
-          <span className="mt-0.5 grid size-8 shrink-0 place-items-center rounded-full bg-brand-50 text-[0.7rem] font-bold text-brand-900" aria-hidden>
-            {row.fullName.split(/\s+/).map((part) => part[0]).join('').slice(0, 2).toUpperCase()}
-          </span>
-          <div className="min-w-0">
-            <p className="truncate text-[0.88rem] font-semibold text-ink-900">
-              <Link to={`/admin/users/${row.id}`} className="hover:text-brand-800 hover:underline">
-                {row.fullName}
-              </Link>
-              {row.isSelf ? <span className="caption ml-1.5">(you)</span> : null}
-            </p>
-            <p className="caption mt-0.5 break-all">{row.email}</p>
-          </div>
-        </div>
-      ),
       sortValue: (row) => row.fullName,
+      render: (row) => (
+        <span className="flex items-center gap-2.5">
+          <Avatar name={row.fullName} src={row.photoUrl} size="sm" />
+          <span className="min-w-0">
+            <span className="block truncate text-sm font-medium text-ink-800">{row.fullName}</span>
+            <span className="block truncate text-xs text-ink-500">{row.email}</span>
+          </span>
+        </span>
+      ),
     },
     {
       key: 'role',
       header: 'Role',
-      render: (row) => (
-        <div className="space-y-1">
-          <Badge tone={row.role === 'ADMIN' ? 'purple' : row.role === 'MOTHER' ? 'green' : 'brand'}>{row.roleLabel}</Badge>
-          {row.requestedRole && row.status === 'PENDING_APPROVAL' ? <p className="caption">requested {ROLE_LABELS[row.requestedRole]}</p> : null}
-        </div>
-      ),
-      hideBelow: 'sm',
+      width: '11rem',
+      sortValue: (row) => row.role,
+      render: (row) => <Badge tone={row.role === 'ADMIN' ? 'purple' : row.role === 'PROVIDER' ? 'brand' : row.role === 'FACILITY_ADMIN' ? 'blue' : 'neutral'}>{ROLE_LABELS[row.role]}</Badge>,
     },
-    { key: 'facility', header: 'Facility', render: (row) => <span className="text-[0.84rem] text-ink-700">{row.facilityName}</span>, hideBelow: 'md', sortValue: (row) => row.facilityName },
     {
       key: 'status',
       header: 'Status',
+      width: '10rem',
+      sortValue: (row) => row.status,
       render: (row) => (
-        <div className="space-y-1">
-          <Badge tone={row.status === 'ACTIVE' ? 'green' : row.status === 'PENDING_APPROVAL' ? 'amber' : 'red'}>
-            {row.status === 'ACTIVE' ? 'Active' : row.status === 'PENDING_APPROVAL' ? 'Awaiting approval' : 'Suspended'}
-          </Badge>
-          <p className="caption">{row.lastLoginAt ? `last seen ${relativeTime(row.lastLoginAt)}` : 'never signed in'}</p>
-        </div>
+        <Badge tone={row.status === 'ACTIVE' ? 'green' : row.status === 'SUSPENDED' ? 'red' : row.status === 'CLOSED' ? 'neutral' : 'amber'}>
+          {ACCOUNT_STATUS_LABELS[row.status]}
+        </Badge>
       ),
+    },
+    {
+      key: 'contact',
+      header: 'Contact',
+      hideBelow: 'lg',
+      render: (row) => (
+        <span className="block text-xs text-ink-600">
+          {row.phone ?? 'No phone'}
+          <span className="block text-ink-500">{row.country}</span>
+        </span>
+      ),
+    },
+    {
+      key: 'activity',
+      header: 'Activity',
       hideBelow: 'md',
+      sortValue: (row) => row.lastLoginAt ?? '',
+      render: (row) => (
+        <span className="block text-xs text-ink-600">
+          {row.lastLoginAt ? `Seen ${relativeTime(row.lastLoginAt)}` : 'Never signed in'}
+          <span className="block text-ink-500">Joined {formatDate(row.createdAt, 'day')}</span>
+        </span>
+      ),
     },
     {
       key: 'actions',
       header: '',
       align: 'right',
+      width: '7rem',
       render: (row) => (
-        <div className="flex flex-wrap justify-end gap-1.5">
-          <Link to={`/admin/users/${row.id}`} className="btn btn-quiet btn-sm">
-            Manage
-          </Link>
-          <Button size="sm" variant="ghost" disabled={busy === row.id} onClick={() => void reset(row)} icon={<KeyRound className="size-3.5" aria-hidden />}>
-            Reset
-          </Button>
-          {row.status === 'SUSPENDED' ? (
-            <Button size="sm" variant="secondary" disabled={busy === row.id} onClick={() => void suspend(row, 'ACTIVE')}>
-              Reactivate
-            </Button>
-          ) : row.status === 'ACTIVE' && !row.isSelf ? (
-            <Button size="sm" variant="ghost" disabled={busy === row.id} onClick={() => void suspend(row, 'SUSPENDED')}>
-              Suspend
-            </Button>
-          ) : null}
-        </div>
+        <Button variant="secondary" size="sm" onClick={() => setSelected(row)} icon={<UserCog className="size-4" aria-hidden />}>
+          Manage
+        </Button>
       ),
     },
   ];
 
   return (
-    <AppShell
-      title="Users"
-      subtitle={`${directory.data?.total ?? 0} account${directory.data?.total === 1 ? '' : 's'} · ${directory.data?.pending ?? 0} awaiting approval`}
-      actions={
+    <StaffShell portal="Admin Dashboard">
+      <StaffPageHeader
+        title="Accounts"
+        description="Every person who can sign in, with the role and status controls. Health records are never editable from here."
+        actions={
+          <>
+            <Button variant="secondary" size="sm" onClick={() => void exportCsv()} disabled={filtered.length === 0} icon={<Download className="size-4" aria-hidden />}>
+              Export CSV
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => void run()} icon={<RefreshCw className="size-4" aria-hidden />}>
+              Refresh
+            </Button>
+          </>
+        }
+      />
+
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <StatCard label="Accounts" value={counts.total} icon={<Users className="size-4" aria-hidden />} />
+        <StatCard label="Mothers & supporters" value={counts.mothers} icon={<Users className="size-4" aria-hidden />} tone="brand" />
+        <StatCard label="Staff accounts" value={counts.staff} icon={<ShieldCheck className="size-4" aria-hidden />} />
+        <StatCard
+          label="Suspended or pending"
+          value={counts.suspended + counts.pending}
+          icon={<ShieldAlert className="size-4" aria-hidden />}
+          tone={counts.suspended > 0 ? 'red' : counts.pending > 0 ? 'amber' : 'green'}
+          hint={`${counts.suspended} suspended · ${counts.pending} pending`}
+        />
+      </div>
+
+      <Card className="card-pad mt-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <SearchInput value={search} onValueChange={setSearch} placeholder="Search name, email, phone or country" className="w-full sm:max-w-sm" />
+          <div className="flex flex-wrap items-center gap-3">
+            <Select
+              aria-label="Filter by role"
+              value={roleFilter}
+              onChange={(event) => setRoleFilter(event.target.value as RoleFilter)}
+              options={[{ value: 'ALL', label: 'All roles' }, ...ROLES.map((role) => ({ value: role, label: ROLE_LABELS[role] }))]}
+              className="w-auto min-w-[10rem]"
+            />
+            <Select
+              aria-label="Filter by status"
+              value={statusFilter}
+              onChange={(event) => setStatusFilter(event.target.value as StatusFilter)}
+              options={[
+                { value: 'ALL', label: 'All statuses' },
+                ...(Object.keys(ACCOUNT_STATUS_LABELS) as AccountStatus[]).map((status) => ({ value: status, label: ACCOUNT_STATUS_LABELS[status] })),
+              ]}
+              className="w-auto min-w-[10rem]"
+            />
+          </div>
+        </div>
+        {counts.neverSignedIn > 0 ? (
+          <p className="mt-3 text-xs text-ink-500">
+            {counts.neverSignedIn} account{counts.neverSignedIn === 1 ? ' has' : 's have'} never signed in — usually an invitation
+            that was not completed, or a registration abandoned halfway.
+          </p>
+        ) : null}
+      </Card>
+
+      <Card className="card-pad mt-4">
+        {error ? <ErrorState title="Accounts could not be loaded" message={error} onRetry={retryable ? run : undefined} /> : null}
+        {loading ? <LoadingRows rows={6} /> : null}
+        {!loading && !error ? (
+          <DataTable
+            rows={filtered}
+            columns={columns}
+            rowKey={(row) => row.uid}
+            caption="Accounts on this deployment, newest first"
+            pageSize={25}
+            emptyTitle="No accounts match"
+            emptyDescription="Clear the filters or search for a different name."
+            emptyAction={
+              search || roleFilter !== 'ALL' || statusFilter !== 'ALL' ? (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => {
+                    setSearch('');
+                    setRoleFilter('ALL');
+                    setStatusFilter('ALL');
+                  }}
+                >
+                  Clear filters
+                </Button>
+              ) : undefined
+            }
+          />
+        ) : null}
+      </Card>
+
+      <Card className="card-pad mt-4 border-ink-200 bg-ink-50">
+        <h3 className="card-title">What an administrator can and cannot do here</h3>
+        <ul className="checklist mt-2 text-sm">
+          <li>Change a role or an account status. Both are logged with your name and the reason you give.</li>
+          <li>Never read or edit a patient's pregnancy record, journal, documents or messages.</li>
+          <li>Suspending an account blocks sign-in immediately; their records stay intact for when they return.</li>
+          <li>Deleting a profile row does not delete health records — the person must do that from their own Settings screen first.</li>
+        </ul>
+      </Card>
+
+      <ManageUserModal
+        user={selected}
+        isSelf={selected?.uid === actor?.uid}
+        onClose={() => setSelected(null)}
+        onSaved={() => {
+          setSelected(null);
+          void run();
+        }}
+      />
+    </StaffShell>
+  );
+}
+
+function ManageUserModal({
+  user,
+  isSelf,
+  onClose,
+  onSaved,
+}: {
+  user: UserProfile | null;
+  isSelf: boolean;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const { actor } = useSession();
+  const toast = useToast();
+  const confirm = useConfirm();
+  const [role, setRole] = useState<Role>('MOTHER');
+  const [status, setStatus] = useState<AccountStatus>('ACTIVE');
+  const [reason, setReason] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!user) return;
+    setRole(user.role);
+    setStatus(user.status);
+    setReason('');
+  }, [user]);
+
+  if (!user) return null;
+
+  const save = async (): Promise<void> => {
+    setBusy(true);
+    try {
+      const patch: Partial<UserProfile> = {};
+      if (role !== user.role) {
+        patch.role = role;
+        patch.privilegeVersion = (user.privilegeVersion ?? 0) + 1;
+      }
+      if (status !== user.status) patch.status = status;
+      if (Object.keys(patch).length === 0) {
+        toast.info('Nothing changed');
+        setBusy(false);
+        return;
+      }
+      await profileRepo.adminUpdate(user.uid, patch);
+      await logAudit(
+        patch.role ? 'role-change' : 'status-change',
+        'users',
+        user.uid,
+        `${patch.role ? `Role ${user.role} → ${patch.role}` : ''}${patch.status ? ` Status ${user.status} → ${patch.status}` : ''}${reason.trim() ? ` — ${reason.trim()}` : ''}`,
+      );
+      toast.success('Account updated', patch.role ? 'The new role applies when they next sign in.' : undefined);
+      onSaved();
+    } catch (cause) {
+      toast.error('That did not save', cause instanceof Error ? cause.message : 'Check the connection and try again.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const close = async (): Promise<void> => {
+    const ok = await confirm({
+      title: `Close ${user.fullName}'s account?`,
+      message:
+        'The account is marked CLOSED and cannot sign in. Records are kept, so the person can be reactivated later. Use this for someone who has finished with the service.',
+      confirmLabel: 'Close account',
+      tone: 'danger',
+    });
+    if (!ok) return;
+    setBusy(true);
+    try {
+      await profileRepo.adminUpdate(user.uid, { status: 'CLOSED' });
+      await logAudit('status-change', 'users', user.uid, `Account closed${reason.trim() ? ` — ${reason.trim()}` : ''}`);
+      toast.success('Account closed');
+      onSaved();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const hardDelete = async (): Promise<void> => {
+    const ok = await confirm({
+      title: `Delete ${user.fullName}'s profile record?`,
+      message:
+        'This removes the account row only. Their pregnancies, babies, journals, documents and messages stay in the database and become orphaned — unreachable and unauditable. Ask the person to delete their own data from Settings first, or close the account instead.',
+      confirmLabel: 'Delete the profile row anyway',
+      tone: 'danger',
+    });
+    if (!ok) return;
+    setBusy(true);
+    try {
+      await profileRepo.adminRemove(user.uid);
+      await logAudit('account-delete', 'users', user.uid, `Profile row deleted by administrator${reason.trim() ? ` — ${reason.trim()}` : ''}`);
+      toast.success('Profile row deleted', 'Orphaned records remain. This was logged.');
+      onSaved();
+    } catch (cause) {
+      toast.error('That did not work', cause instanceof Error ? cause.message : undefined);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      size="lg"
+      title={user.fullName}
+      description={`${user.email} · joined ${formatDate(user.createdAt, 'long')}${user.lastLoginAt ? ` · last seen ${relativeTime(user.lastLoginAt)}` : ' · never signed in'}`}
+      footer={
         <>
-          <Button size="sm" variant="secondary" loading={directory.loading} onClick={() => void directory.run()} icon={<RefreshCw className="size-4" aria-hidden />}>
-            Refresh
+          <Button variant="ghost" onClick={onClose} disabled={busy}>Close</Button>
+          {!isSelf ? (
+            <Button variant="outline-danger" size="sm" onClick={() => void hardDelete()} disabled={busy} icon={<Trash2 className="size-4" aria-hidden />}>
+              Delete profile row
+            </Button>
+          ) : null}
+          <Button variant="secondary" onClick={() => void close()} disabled={busy || isSelf} icon={<Mail className="size-4" aria-hidden />}>
+            Close account
           </Button>
-          <Button size="sm" onClick={() => setCreating(true)} icon={<UserPlus className="size-4" aria-hidden />}>
-            Create staff account
+          <Button onClick={() => void save()} loading={busy} icon={<ShieldCheck className="size-4" aria-hidden />}>
+            Save changes
           </Button>
         </>
       }
     >
-      <Card className="mb-4" bodyClassName="p-3 sm:p-4">
-        <div className="flex flex-wrap items-center gap-3">
-          <SearchInput value={term} onValueChange={setTerm} placeholder="Search name, email or phone" className="min-w-[15rem] flex-1" />
-          <Select
-            value={role}
-            className="w-44"
-            options={[{ value: 'ALL', label: 'Any role' }, ...(Object.keys(ROLE_LABELS) as Role[]).map((key) => ({ value: key, label: ROLE_LABELS[key] }))]}
-            onValueChange={(value) => setRole(value as Role | 'ALL')}
-          />
-          <Select
-            value={status}
-            className="w-44"
-            options={[
-              { value: 'ALL', label: 'Any status' },
-              { value: 'ACTIVE', label: 'Active' },
-              { value: 'PENDING_APPROVAL', label: 'Awaiting approval' },
-              { value: 'SUSPENDED', label: 'Suspended' },
-            ]}
-            onValueChange={(value) => setStatus(value as AccountStatus | 'ALL')}
-          />
-          <Select
-            value={facilityId}
-            className="w-52"
-            options={(facilities.data ?? []).map((facility) => ({ value: facility.id, label: facility.name }))}
-            onValueChange={setFacilityId}
-            placeholder="Any facility"
-          />
-          {term || role !== 'ALL' || status !== 'ALL' || facilityId ? (
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => {
-                setTerm('');
-                setRole('ALL');
-                setStatus('ALL');
-                setFacilityId('');
-              }}
-            >
-              Clear filters
-            </Button>
-          ) : null}
+      <div className="space-y-4">
+        <div className="flex flex-wrap items-center gap-3 rounded-lg border border-ink-200 px-3 py-2">
+          <Avatar name={user.fullName} src={user.photoUrl} size="md" />
+          <div className="min-w-0 flex-1">
+            <KeyValue
+              columns={2}
+              dense
+              items={[
+                { label: 'Role', value: ROLE_LABELS[user.role] },
+                { label: 'Status', value: ACCOUNT_STATUS_LABELS[user.status] },
+                { label: 'Phone', value: user.phone ?? 'Not provided' },
+                { label: 'Country', value: user.country },
+                { label: 'Language', value: user.language },
+                { label: 'Consent given', value: user.consentAt ? formatDate(user.consentAt, 'day') : '—' },
+                { label: 'Provider record', value: user.providerId ? 'Linked' : 'None' },
+                { label: 'Supports', value: user.supportsUserId ?? '—' },
+              ]}
+            />
+          </div>
         </div>
-      </Card>
 
-      {directory.error ? <div className="mb-4"><ErrorState message={directory.error} onRetry={() => void directory.run()} /></div> : null}
+        {isSelf ? (
+          <p className="alert alert-info">
+            This is your own account. You cannot change your own role or close it — that keeps a deployment from being locked
+            out by one mistake.
+          </p>
+        ) : null}
 
-      <Card bodyClassName="p-0">
-        {rows.length === 0 && !directory.loading ? (
-          <EmptyState
-            icon={<Search className="size-5" aria-hidden />}
-            title="No accounts match these filters"
-            description="Health workers who self-register appear here once they have confirmed their email — with the status “Awaiting approval”."
-          />
-        ) : (
-          <DataTable rows={rows} columns={columns} rowKey={(row) => row.id} loading={directory.loading} dense pageSize={25} caption="Accounts" />
-        )}
-      </Card>
-
-      <div className="mt-4">
-        <NoticeState tone="info" title="How privileges actually work" compact>
-          Roles live in the token as custom claims and are enforced by the database rules. Changing a role here updates the claims and bumps the account’s
-          privilege version, so the old token stops working at its next refresh — the interface never decides what data a person may read.
-        </NoticeState>
-      </div>
-
-      <CreateStaffDialog
-        open={creating}
-        onClose={() => setCreating(false)}
-        facilities={(facilities.data ?? []).map((facility) => ({ value: facility.id, label: facility.name }))}
-        onCreated={() => {
-          setCreating(false);
-          void directory.run();
-        }}
-      />
-    </AppShell>
-  );
-}
-
-function CreateStaffDialog({
-  open,
-  onClose,
-  facilities,
-  onCreated,
-}: {
-  open: boolean;
-  onClose: () => void;
-  facilities: { value: string; label: string }[];
-  onCreated: () => void;
-}) {
-  const toast = useToast();
-  const form = useForm(adminCreateUserSchema, {
-    fullName: '',
-    email: '',
-    phone: '',
-    role: 'MIDWIFE',
-    facilityId: facilities[0]?.value ?? '',
-    jobTitle: '',
-    temporaryPassword: '',
-    note: '',
-  });
-
-  useEffect(() => {
-    if (open && !form.values.facilityId && facilities[0]) form.setField('facilityId', facilities[0].value);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, facilities]);
-
-  const submit = async () => {
-    await form.submit(async (values) => {
-      const result = await createStaffAccount({
-        fullName: values.fullName,
-        email: values.email,
-        phone: values.phone,
-        role: values.role as Role,
-        facilityId: values.facilityId,
-        temporaryPassword: values.temporaryPassword,
-        note: values.note || undefined,
-      });
-      toast.success(
-        'Account created',
-        result.created === 'server'
-          ? `${values.email} can sign in with the temporary password and is asked to change it.`
-          : `${values.email} was created in device storage for this browser (no auth server configured).`,
-      );
-      form.reset({ ...form.values, email: '', fullName: '', temporaryPassword: '', note: '' });
-      onCreated();
-    });
-  };
-
-  return (
-    <FormDialog
-      open={open}
-      onClose={onClose}
-      onSubmit={() => void submit()}
-      title="Create a staff account"
-      description="The account is created active with the role you choose. Administrators can grant administrator rights here; no other role can."
-      submitting={form.submitting}
-      dirty={form.dirty}
-      formError={form.formError}
-      submitLabel="Create account"
-      size="md"
-    >
-      <div className="space-y-3">
-        <div className="grid gap-3 sm:grid-cols-2">
-          <Field label="Full name" error={form.errors.fullName} required>
-            <TextInput value={form.values.fullName} onValueChange={(value) => form.setField('fullName', value)} onBlur={() => form.blur('fullName')} />
-          </Field>
-          <Field label="Work email" error={form.errors.email} required>
-            <TextInput type="email" value={form.values.email} onValueChange={(value) => form.setField('email', value)} onBlur={() => form.blur('email')} />
-          </Field>
-          <Field label="Phone" error={form.errors.phone} required>
-            <TextInput value={form.values.phone} onValueChange={(value) => form.setField('phone', value)} placeholder="+260 97 000 0000" />
-          </Field>
-          <Field label="Job title" error={form.errors.jobTitle}>
-            <TextInput value={form.values.jobTitle} onValueChange={(value) => form.setField('jobTitle', value)} placeholder="In-charge, antenatal clinic" />
-          </Field>
-          <Field label="Role" error={form.errors.role} required hint="ADMIN is deliberately selectable only by an existing administrator.">
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field label="Role" htmlFor="au-role" hint="Applies at their next sign-in, because roles travel in the token.">
             <Select
-              value={form.values.role}
-              options={(Object.keys(ROLE_LABELS) as Role[]).map((key) => ({ value: key, label: ROLE_LABELS[key] }))}
-              onValueChange={(value) => form.setField('role', value as Role)}
-              placeholder={null}
+              id="au-role"
+              value={role}
+              onChange={(event) => setRole(event.target.value as Role)}
+              disabled={isSelf}
+              options={ROLES.map((value) => ({ value, label: ROLE_LABELS[value] }))}
             />
           </Field>
-          <Field label="Facility" error={form.errors.facilityId} required>
-            <Select value={form.values.facilityId} options={facilities} onValueChange={(value) => form.setField('facilityId', value)} placeholder={facilities.length ? 'Select a facility' : 'No facilities configured yet'} />
+          <Field label="Status" htmlFor="au-status" hint="Suspended blocks sign-in immediately.">
+            <Select
+              id="au-status"
+              value={status}
+              onChange={(event) => setStatus(event.target.value as AccountStatus)}
+              disabled={isSelf}
+              options={(Object.keys(ACCOUNT_STATUS_LABELS) as AccountStatus[]).map((value) => ({
+                value,
+                label: ACCOUNT_STATUS_LABELS[value],
+              }))}
+            />
           </Field>
         </div>
-        <Field label="Temporary password" error={form.errors.temporaryPassword} required hint="At least 10 characters, mixed case and a digit. Hand it over in person.">
-          <TextInput type="text" value={form.values.temporaryPassword} onValueChange={(value) => form.setField('temporaryPassword', value)} onBlur={() => form.blur('temporaryPassword')} />
+
+        <Field label="Reason for this change" htmlFor="au-reason" hint="Stored in the audit log and shown to the person if their access changes.">
+          <TextArea id="au-reason" rows={3} value={reason} onChange={(event) => setReason(event.target.value)} placeholder="e.g. Licence could not be verified with the council; account suspended until they respond." />
         </Field>
-        <Field label="Reason for the account" error={form.errors.note} hint="Stored with the audit entry.">
-          <TextInput value={form.values.note} onValueChange={(value) => form.setField('note', value)} placeholder="Transferred from Chazoma health centre" />
-        </Field>
-        <p className="caption flex items-center gap-1.5">
-          <Users className="size-3.5" aria-hidden />
-          Created accounts are limited to their facility. A mother’s patient login is created from her record instead, so it is always tied to one patient.
+
+        {role !== user.role || status !== user.status ? (
+          <p className="alert alert-info">
+            Pending change: {role !== user.role ? `role ${ROLE_LABELS[user.role]} → ${ROLE_LABELS[role]}` : ''}
+            {role !== user.role && status !== user.status ? ', ' : ''}
+            {status !== user.status ? `status ${ACCOUNT_STATUS_LABELS[user.status]} → ${ACCOUNT_STATUS_LABELS[status]}` : ''}.
+          </p>
+        ) : null}
+
+        <p className="flex items-start gap-2 text-xs text-ink-500">
+          <Search className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+          Searching this list never returns another person's health data — it searches names, emails, phone numbers and
+          countries only.
         </p>
       </div>
-    </FormDialog>
+    </Modal>
   );
 }

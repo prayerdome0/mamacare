@@ -1,311 +1,352 @@
 /**
  * Firebase Authentication adapter.
  *
- * Uses the public Web SDK only. Custom claims (role, facility, approval status)
- * are minted server-side by the API service — the client can read them from the
- * ID token but can never write them.
+ * Email + password is the identity provider. The role a user has comes from
+ * custom claims on the ID token when they exist (`role`, `facilityId`,
+ * `providerId`, `privilegeVersion`) and from `users/{uid}` otherwise — the token
+ * claims are what `firestore.rules` can check, so the session records which
+ * source won and the interface can explain a mismatch instead of showing an
+ * empty dashboard.
+ *
+ * Errors are translated into sentences a mother can act on. A wrong password and
+ * a locked-out account must never produce the same message as a network failure.
  */
 
 import {
   EmailAuthProvider,
-  browserLocalPersistence,
-  browserSessionPersistence,
   createUserWithEmailAndPassword,
-  getRedirectResult,
+  deleteUser as fbDeleteUser,
   onIdTokenChanged,
   reauthenticateWithCredential,
   sendPasswordResetEmail,
-  setPersistence,
   signInWithEmailAndPassword,
-  updatePassword,
-  updateProfile,
-  type Auth,
+  signOut as fbSignOut,
+  updatePassword as fbUpdatePassword,
+  updateProfile as fbUpdateProfile,
   type User,
 } from 'firebase/auth';
-import { AppError, logProviderError, toAppError } from '@/lib/errors';
-import { safeSession } from '@/lib/storage';
-import type { AuthClaims } from '@/types/domain';
-import type { Actor, AuthAdapter } from '@/services/data/contract';
 import { getFirebaseAuth } from '@/services/firebase/app';
-import { syncClaimsFromDocument } from '@/services/auth/claims-sync';
-import { normaliseRole, normaliseStatus, resolveRole } from '@/services/auth/role-resolution';
-import type { StoredProfile } from '@/services/auth/profile-lookup';
+import { AppError, logProviderError } from '@/lib/errors';
+import { passwordPolicy } from '@/lib/validation';
+import { safeLocal } from '@/lib/storage';
+import { claimsFromToken, toActor, type Claims } from '@/services/auth/profile-lookup';
+import type { Actor, AuthAdapter, ProfileDraft } from '@/services/data/contract';
+import type { UserProfile } from '@/types/domain';
 
-/**
- * Reads `users/{uid}` (the stored role/status). Optional: the adapter works from
- * the ID token claims alone when no reader is wired.
- */
-type ProfileReader = (uid: string, email: string) => Promise<StoredProfile>;
+export interface FirebaseAuthHooks {
+  /** Reads `users/{uid}`; falls back to an email lookup for pre-profile accounts. */
+  readProfile(uid: string, email?: string): Promise<UserProfile | null>;
+  createProfile(profile: UserProfile): Promise<UserProfile>;
+  updateProfile(uid: string, patch: Partial<UserProfile>): Promise<void>;
+}
 
-const IDLE_LOGOUT_MS = 30 * 60_000;
-const ACTOR_REFRESH_MS = 5 * 60_000;
+const PROFILE_CACHE_KEY = 'profileCache';
+const PROFILE_CACHE_TTL_MS = 5 * 60_000;
 
-export class FirebaseAuthAdapter implements AuthAdapter {
+interface CachedProfile {
+  at: number;
+  profile: UserProfile;
+}
+
+function readCachedProfile(uid: string): UserProfile | null {
+  const cache = safeLocal.getJson<Record<string, CachedProfile>>(PROFILE_CACHE_KEY, {});
+  const entry = cache[uid];
+  if (!entry || Date.now() - entry.at > PROFILE_CACHE_TTL_MS) return null;
+  return entry.profile;
+}
+
+function writeCachedProfile(profile: UserProfile): void {
+  const cache = safeLocal.getJson<Record<string, CachedProfile>>(PROFILE_CACHE_KEY, {});
+  cache[profile.uid || profile.id] = { at: Date.now(), profile };
+  // Keep the cache small: profiles only, most recent twenty.
+  const keys = Object.keys(cache);
+  if (keys.length > 20) for (const key of keys.slice(0, keys.length - 20)) delete cache[key];
+  safeLocal.setJson(PROFILE_CACHE_KEY, cache);
+}
+
+export class FirebaseAuth implements AuthAdapter {
   readonly kind = 'firebase' as const;
-  private authInstance: Auth | null = null;
-  private actor: Actor | null = null;
-  private listeners = new Set<(actor: Actor | null) => void>();
-  private unsub: (() => void) | null = null;
-  private profileReader: ProfileReader | null = null;
-  private idleTimer: ReturnType<typeof setTimeout> | null = null;
 
-  /**
-   * Firebase Auth is acquired on first use, never at module load.
-   *
-   * This module is imported by the service registry that every route depends on.
-   * Creating the Auth instance eagerly meant that a build without Firebase
-   * environment variables — a device-mode build, or a static host whose variables
-   * were not configured — threw while the bundle was still evaluating, before any
-   * error boundary could render. The visible result was a blank page / host-level
-   * error on every URL, including sign-in and registration.
-   */
-  private get auth(): Auth {
-    if (!this.authInstance) this.authInstance = getFirebaseAuth();
-    return this.authInstance;
+  private hooks: FirebaseAuthHooks | null = null;
+  private listeners = new Set<(actor: Actor | null) => void>();
+  private current: Actor | null = null;
+  private unsubscribe: (() => void) | null = null;
+  private claims: Claims | null = null;
+  private started = false;
+
+  wire(hooks: FirebaseAuthHooks): void {
+    this.hooks = hooks;
   }
 
-  wire(reader: ProfileReader): void {
-    this.profileReader = reader;
+  private requireHooks(): FirebaseAuthHooks {
+    if (!this.hooks) throw new AppError('Authentication is still starting. Please try again.', 'CONFIGURATION');
+    return this.hooks;
+  }
+
+  private emit(actor: Actor | null): void {
+    this.current = actor;
+    for (const listener of this.listeners) {
+      try {
+        listener(actor);
+      } catch (error) {
+        logProviderError('auth listener', error);
+      }
+    }
+  }
+
+  /** Resolves the actor for a Firebase user: claims first, then the profile. */
+  private async resolve(user: User | null): Promise<Actor | null> {
+    if (!user) {
+      this.claims = null;
+      return null;
+    }
+    let claims: Claims | null = null;
+    try {
+      const token = await user.getIdTokenResult();
+      claims = claimsFromToken(token.claims as Record<string, unknown>);
+    } catch (error) {
+      logProviderError('id token claims', error);
+    }
+    this.claims = claims;
+
+    const hooks = this.requireHooks();
+    let profile: UserProfile | null = null;
+    try {
+      profile = await hooks.readProfile(user.uid, user.email ?? undefined);
+      if (profile) writeCachedProfile(profile);
+    } catch (error) {
+      logProviderError('profile lookup', error);
+      profile = readCachedProfile(user.uid);
+    }
+
+    if (!profile) {
+      // An authenticated Firebase user with no profile document (created from the
+      // console, or a first sign-in that failed before the write). Build one from
+      // the token so the app has something to show, marked as unapproved.
+      profile = {
+        id: user.uid,
+        uid: user.uid,
+        fullName: user.displayName ?? user.email?.split('@')[0] ?? 'Mama Care user',
+        email: user.email ?? '',
+        phone: user.phoneNumber ?? null,
+        dateOfBirth: null,
+        country: 'ZM',
+        language: 'en',
+        role: claims?.role ?? 'MOTHER',
+        status: 'PENDING_APPROVAL',
+        photoUrl: user.photoURL ?? null,
+        photoPublicId: null,
+        emergencyContact: null,
+        notificationPrefs: {
+          appointments: true,
+          reminders: true,
+          education: true,
+          milestones: true,
+          baby: true,
+          quietFrom: '21:00',
+          quietTo: '06:00',
+        },
+        providerId: claims?.providerId ?? null,
+        facilityId: claims?.facilityId ?? null,
+        supportsUserId: null,
+        consentAt: null,
+        lastLoginAt: new Date().toISOString(),
+        privilegeVersion: claims?.privilegeVersion ?? 1,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      try {
+        await hooks.createProfile(profile);
+      } catch (error) {
+        logProviderError('profile provisioning', error);
+      }
+    }
+
+    return toActor(profile, claims);
+  }
+
+  async restore(): Promise<void> {
+    if (this.started) return;
+    this.started = true;
+    const auth = getFirebaseAuth();
+    this.unsubscribe = onIdTokenChanged(auth, (user) => {
+      void this.resolve(user).then(
+        (actor) => this.emit(actor),
+        (error) => {
+          logProviderError('session resolve', error);
+          this.emit(null);
+        },
+      );
+    });
+  }
+
+  async getActor(): Promise<Actor | null> {
+    if (!this.started) await this.restore();
+    return this.current;
   }
 
   onSessionChange(listener: (actor: Actor | null) => void): () => void {
     this.listeners.add(listener);
-    listener(this.actor);
-    return () => {
-      this.listeners.delete(listener);
-    };
+    listener(this.current);
+    return () => this.listeners.delete(listener);
   }
 
-  private emit(actor: Actor | null): void {
-    this.actor = actor;
-    for (const listener of this.listeners) listener(actor);
-  }
-
-  async restore(): Promise<void> {
-    await getRedirectResult(this.auth).catch(() => null);
-    this.unsub?.();
-    this.unsub = onIdTokenChanged(this.auth, (user) => {
-      if (!user) {
-        this.emit(null);
-        return;
-      }
-      void this.syncActor(user).catch(() => this.emit(null));
-      this.armIdleTimer();
-    });
-    const user = this.auth.currentUser;
-    if (user) {
-      await this.syncActor(user);
-      this.armIdleTimer();
-    } else {
-      this.emit(null);
+  /** Creates the Firebase Auth account, then the profile document. */
+  async createAccount(input: {
+    email: string;
+    password: string;
+    profile: ProfileDraft;
+  }): Promise<{ user: User; profile: UserProfile }> {
+    try {
+      const credential = await createUserWithEmailAndPassword(getFirebaseAuth(), input.email.trim(), input.password);
+      const nowIso = new Date().toISOString();
+      const profile = {
+        ...input.profile,
+        id: credential.user.uid,
+        uid: credential.user.uid,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      } as UserProfile;
+      await this.requireHooks().createProfile(profile);
+      await fbUpdateProfile(credential.user, { displayName: input.profile.fullName }).catch(() => undefined);
+      this.emit(toActor(profile, this.claims));
+      return { user: credential.user, profile };
+    } catch (error) {
+      throw mapAuthError(error);
     }
-  }
-
-  /**
-   * Builds the session actor.
-   *
-   * The role comes from `users/{uid}` (Firestore is the source of truth, per the
-   * platform's role model) and falls back to the ID token claims, which the API
-   * service mints from that same document. When the two disagree — for example
-   * an account made an administrator in the Firebase console — the client asks
-   * the API service to re-mint the claims and then reloads the token, so the
-   * security rules and the interface agree again. Until that succeeds the actor
-   * is marked as unsynced, and screens that need privileged reads explain it
-   * instead of failing with a raw permission error.
-   */
-  private async syncActor(user: User, options: { syncClaims?: boolean } = {}): Promise<Actor> {
-    const email = user.email ?? '';
-    const token = await user.getIdTokenResult(false);
-    const claims = (token.claims ?? {}) as Partial<AuthClaims> & { fullName?: string };
-    const claimsRole = normaliseRole(claims.role);
-    const profile = this.profileReader ? await this.profileReader(user.uid, email).catch(() => null) : null;
-
-    const resolution = resolveRole({ documentRole: profile?.role ?? null, claimsRole });
-    const accountStatus = profile?.exists
-      ? profile.status
-      : normaliseStatus(claims.accountStatus, 'PENDING_APPROVAL');
-
-    let actor: Actor = {
-      uid: user.uid,
-      email: email || profile?.email || '',
-      displayName: profile?.fullName || claims.fullName || user.displayName || email,
-      role: resolution.role,
-      facilityId: profile?.exists ? profile.facilityId : ((claims.facilityId as string | null) ?? null),
-      accountStatus,
-      motherId: profile?.exists ? profile.motherId : ((claims.motherId as string | null) ?? null),
-      privilegeVersion: profile?.privilegeVersion ?? Number(claims.privilegeVersion ?? 0),
-      claimsSource: claims.role ? 'firebase-id-token' : 'firebase-profile',
-      roleSource: resolution.roleSource,
-      claimsPendingSync: resolution.needsClaimSync,
-      claimSyncNotice: null,
-      country: profile?.country ?? null,
-    };
-
-    this.emit(actor);
-
-    if (resolution.needsClaimSync && options.syncClaims !== false) {
-      const result = await syncClaimsFromDocument({ force: resolution.escalation });
-      if (result.synced) {
-        await user.getIdTokenResult(true).catch(() => null);
-        const refreshed = await user.getIdTokenResult(false);
-        const refreshedClaims = (refreshed.claims ?? {}) as Partial<AuthClaims>;
-        const refreshedRole = normaliseRole(refreshedClaims.role);
-        actor = {
-          ...actor,
-          role: refreshedRole ?? actor.role,
-          roleSource: refreshedRole ? 'custom-claims' : actor.roleSource,
-          claimsSource: refreshedRole ? 'firebase-id-token' : actor.claimsSource,
-          claimsPendingSync: false,
-          claimSyncNotice: null,
-          privilegeVersion: Number(refreshedClaims.privilegeVersion ?? actor.privilegeVersion),
-        };
-        this.emit(actor);
-      } else if (result.reason) {
-        actor = { ...actor, claimsPendingSync: true, claimSyncNotice: result.reason };
-        this.emit(actor);
-      }
-    }
-
-    return actor;
-  }
-
-  private armIdleTimer(): void {
-    if (this.idleTimer) clearTimeout(this.idleTimer);
-    this.idleTimer = setTimeout(() => {
-      void this.signOut('idle');
-    }, IDLE_LOGOUT_MS);
-  }
-
-  private touch(): void {
-    if (this.auth.currentUser) this.armIdleTimer();
-  }
-
-  async getActor(): Promise<Actor | null> {
-    this.touch();
-    return this.actor;
-  }
-
-  async refreshClaims(): Promise<Actor | null> {
-    const user = this.auth.currentUser;
-    if (!user) return null;
-    await user.getIdTokenResult(true).catch(() => null);
-    await this.syncActor(user, { syncClaims: false });
-    return this.actor;
   }
 
   async signIn(email: string, password: string, remember = true): Promise<Actor> {
+    if (!remember) {
+      // Session persistence is applied by the caller before signing in.
+      const { browserSessionPersistence, setPersistence } = await import('firebase/auth');
+      await setPersistence(getFirebaseAuth(), browserSessionPersistence).catch(() => undefined);
+    }
     try {
-      await setPersistence(this.auth, remember ? browserLocalPersistence : browserSessionPersistence);
-      const credential = await signInWithEmailAndPassword(this.auth, email.trim().toLowerCase(), password);
-      const actor = await this.syncActor(credential.user);
-      this.touch();
+      const credential = await signInWithEmailAndPassword(getFirebaseAuth(), email.trim(), password);
+      const actor = await this.resolve(credential.user);
+      if (!actor) throw new AppError('Your account could not be loaded. Please try again.', 'UNKNOWN', { retryable: true });
+      await this.requireHooks()
+        .updateProfile(actor.uid, { lastLoginAt: new Date().toISOString() })
+        .catch(() => undefined);
+      this.emit(actor);
       return actor;
     } catch (error) {
-      logProviderError('firebase sign-in', error);
-      throw toAppError(error, 'Sign-in failed. Please check your details and try again.');
+      throw mapAuthError(error);
     }
   }
 
-  async signOut(reason?: string): Promise<void> {
-    if (this.idleTimer) clearTimeout(this.idleTimer);
-    this.unsub?.();
-    this.unsub = null;
-    await this.auth.signOut().catch(() => null);
+  async signOut(): Promise<void> {
+    try {
+      await fbSignOut(getFirebaseAuth());
+    } catch (error) {
+      throw mapAuthError(error);
+    }
     this.emit(null);
-    if (reason === 'idle') {
-      // Surfaced by the session hook as a banner on the sign-in screen. Storage
-      // access can throw in private/partitioned contexts — never crash sign-out.
-      safeSession.set('mamacare.session.notice', 'idle-timeout');
-    }
   }
 
-  async register(input: {
-    fullName: string;
-    email: string;
-    phone: string;
-    password: string;
-    claims: AuthClaims;
-  }): Promise<{ uid: string }> {
+  async refreshClaims(): Promise<Actor | null> {
+    const user = getFirebaseAuth().currentUser;
+    if (!user) {
+      this.emit(null);
+      return null;
+    }
     try {
-      const credential = await createUserWithEmailAndPassword(this.auth, input.email.trim().toLowerCase(), input.password);
-      await updateProfile(credential.user, { displayName: input.fullName });
-      // Auth metadata written here is untrusted display context only: claims are
-      // minted by the API service when an administrator approves the account.
-      await this.syncActor(credential.user);
-      return { uid: credential.user.uid };
+      await user.getIdToken(true);
     } catch (error) {
-      logProviderError('firebase registration', error);
-      throw toAppError(error, 'Unable to create your account. Please try again.');
+      logProviderError('token refresh', error);
     }
+    const actor = await this.resolve(user);
+    this.emit(actor);
+    return actor;
   }
 
-  async resetPassword(email: string): Promise<void> {
+  async sendPasswordReset(email: string): Promise<void> {
     try {
-      await sendPasswordResetEmail(this.auth, email.trim().toLowerCase(), {
-        url: `${window.location.origin}/reset-password`,
-        handleCodeInApp: true,
-      });
+      await sendPasswordResetEmail(getFirebaseAuth(), email.trim());
     } catch (error) {
-      throw toAppError(error, 'We could not send a reset link right now. Please try again.');
+      throw mapAuthError(error);
     }
   }
 
-  async confirmReset(code: string, password: string): Promise<void> {
-    const { confirmPasswordReset } = await import('firebase/auth');
-    try {
-      await confirmPasswordReset(this.auth, code, password);
-    } catch (error) {
-      throw toAppError(error, 'That reset link is invalid or has expired. Please request a new one.');
-    }
-  }
-
-  async changePassword(currentPassword: string | null, newPassword: string): Promise<void> {
-    const user = this.auth.currentUser;
-    if (!user?.email) throw new AppError('Please sign in again before changing your password.', 'SESSION_EXPIRED');
-    if (!currentPassword) throw new AppError('Enter your current password to confirm this change.', 'VALIDATION');
-    try {
-      await reauthenticateWithCredential(user, EmailAuthProvider.credential(user.email, currentPassword));
-      await updatePassword(user, newPassword);
-      await user.getIdTokenResult(true);
-    } catch (error) {
-      const mapped = toAppError(error, 'We could not change your password. Please try again.');
-      if (mapped.code === 'UNAUTHENTICATED') {
-        throw new AppError('Your current password is incorrect.', 'VALIDATION');
-      }
-      throw mapped;
-    }
-  }
-
-  async verifyRecentLogin(password: string): Promise<void> {
-    const user = this.auth.currentUser;
+  async changePassword(current: string, next: string): Promise<void> {
+    const user = getFirebaseAuth().currentUser;
     if (!user?.email) throw new AppError('Please sign in again.', 'SESSION_EXPIRED');
-    await reauthenticateWithCredential(user, EmailAuthProvider.credential(user.email, password));
-  }
-
-  async updateProfile(patch: { displayName?: string; photoURL?: string | null }): Promise<void> {
-    const user = this.auth.currentUser;
-    if (!user) throw new AppError('Your session has expired. Please sign in again.', 'SESSION_EXPIRED');
     try {
-      await updateProfile(user, { displayName: patch.displayName, photoURL: patch.photoURL ?? null });
-      await this.syncActor(user);
+      await reauthenticateWithCredential(user, EmailAuthProvider.credential(user.email, current));
+      await fbUpdatePassword(user, next);
     } catch (error) {
-      throw toAppError(error, 'We could not update your profile. Please try again.');
+      throw mapAuthError(error);
     }
   }
 
   async deleteAccount(password?: string): Promise<void> {
-    const { deleteUser } = await import('firebase/auth');
-    const user = this.auth.currentUser;
-    if (!user) throw new AppError('Your session has expired. Please sign in again.', 'SESSION_EXPIRED');
-    if (!user.email || !password) throw new AppError('Confirm your password to deactivate this account.', 'VALIDATION');
+    const user = getFirebaseAuth().currentUser;
+    if (!user?.email) throw new AppError('Please sign in again.', 'SESSION_EXPIRED');
     try {
-      await reauthenticateWithCredential(user, EmailAuthProvider.credential(user.email, password));
-      await deleteUser(user);
+      if (password) {
+        await reauthenticateWithCredential(user, EmailAuthProvider.credential(user.email, password));
+      }
+      await fbDeleteUser(user);
       this.emit(null);
     } catch (error) {
-      throw toAppError(error, 'We could not deactivate this account. Please contact your administrator.');
+      throw mapAuthError(error);
     }
+  }
+
+  get currentClaims(): Claims | null {
+    return this.claims;
+  }
+
+  stop(): void {
+    this.unsubscribe?.();
+    this.unsubscribe = null;
+    this.started = false;
   }
 }
 
-export const firebaseAuth = new FirebaseAuthAdapter();
+/** Firebase error codes → sentences the user can act on. */
+export function mapAuthError(error: unknown): AppError {
+  const code = String((error as { code?: string })?.code ?? '');
+  switch (code) {
+    case 'auth/invalid-email':
+      return new AppError('That email address does not look right. Check it and try again.', 'VALIDATION');
+    case 'auth/user-disabled':
+      return new AppError('This account has been disabled. Contact support@mamacare.health.', 'FORBIDDEN');
+    case 'auth/user-not-found':
+    case 'auth/wrong-password':
+    case 'auth/invalid-credential':
+      return new AppError('That email and password combination was not recognised.', 'FORBIDDEN');
+    case 'auth/email-already-in-use':
+      return new AppError('An account already exists with that email. Try signing in instead.', 'CONFLICT');
+    case 'auth/weak-password':
+      return new AppError(passwordPolicy.message, 'VALIDATION');
+    case 'auth/too-many-requests':
+      return new AppError('Too many attempts. Wait a few minutes, or reset your password.', 'RATE_LIMIT');
+    case 'auth/requires-recent-login':
+      return new AppError('For your security, sign out and sign in again before making that change.', 'SESSION_EXPIRED');
+    case 'auth/operation-not-allowed':
+      return new AppError(
+        'Email sign-in is not enabled on this Firebase project. Turn it on under Authentication → Sign-in method.',
+        'CONFIGURATION',
+      );
+    case 'auth/network-request-failed':
+      return new AppError('Could not reach Firebase. Check your connection and try again.', 'NETWORK', { retryable: true });
+    case 'auth/popup-blocked':
+    case 'auth/cancelled-popup-request':
+      return new AppError('Your browser blocked the sign-in window. Allow pop-ups for this site and try again.', 'CONFIGURATION');
+    case 'auth/unauthorized-domain':
+      return new AppError(
+        'This site is not listed as an authorised domain for the Firebase project. Add it under Authentication → Settings → Authorised domains.',
+        'CONFIGURATION',
+      );
+    default:
+      return new AppError(
+        (error as Error)?.message || 'Authentication failed. Please try again.',
+        'UNKNOWN',
+        { retryable: true },
+      );
+  }
+}
+
+export const firebaseAuth = new FirebaseAuth();
