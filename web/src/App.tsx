@@ -39,6 +39,7 @@ const SignInPage = lazy(() => import('@/routes/auth/sign-in'));
 const RegisterPage = lazy(() => import('@/routes/auth/register'));
 const ForgotPasswordPage = lazy(() => import('@/routes/auth/forgot-password'));
 const PendingApprovalPage = lazy(() => import('@/routes/auth/pending'));
+const BecomeAProviderPage = lazy(() => import('@/routes/auth/become-a-provider'));
 
 /* ── Mother (and supporter) app ────────────────────────────────────────── */
 const MotherHome = lazy(() => import('@/routes/mother/home'));
@@ -176,6 +177,14 @@ function AppRoutes() {
           element={
             <RequireAuth>
               <PendingApprovalPage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/become-a-provider"
+          element={
+            <RequireAuth>
+              <BecomeAProviderPage />
             </RequireAuth>
           }
         />

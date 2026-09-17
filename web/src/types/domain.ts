@@ -391,10 +391,18 @@ export const FACILITY_TYPE_LABELS: Record<FacilityType, string> = {
 export interface Facility extends BaseRecord {
   name: string;
   type: FacilityType;
+  /** District the facility serves (e.g. "Chama"). Used for district-level search. */
+  district: string;
   address: string;
   city: string;
   province: string;
   country: string;
+  /**
+   * One or two sentences of verified context (when the facility was built, what
+   * it is known for, its role in the district). Kept deliberately factual; where
+   * nothing verifiable exists this stays null and the UI says so.
+   */
+  description: string | null;
   phone: string | null;
   emergencyPhone: string | null;
   latitude: number | null;
@@ -433,7 +441,17 @@ export interface HealthcareProvider extends BaseRecord {
   profession: Profession;
   facilityId: string | null;
   facilityName: string;
+  /** Town or district where the clinician practices (from the application form). */
+  location: string | null;
   licenseNumber: string | null;
+  /** Qualifications as stated by the applicant (degrees, certificates, years of experience). */
+  qualifications: string | null;
+  /**
+   * Ids of `documents` records attached to the application (practising
+   * certificate, registration, references). The files themselves live under the
+   * applicant's own document path; administrators may read them, nobody else.
+   */
+  supportingDocuments: string[];
   languages: string[];
   bio: string | null;
   phone: string | null;

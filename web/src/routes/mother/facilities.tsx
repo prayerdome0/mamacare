@@ -39,6 +39,7 @@ export default function MotherFacilitiesPage() {
   const term = useDebouncedValue(search, 200);
   const [type, setType] = useState<FacilityType | ''>('');
   const [province, setProvince] = useState('');
+  const [district, setDistrict] = useState('');
   const [maternityOnly, setMaternityOnly] = useState(false);
   const [origin, setOrigin] = useState<[number, number] | null>(null);
   const [locating, setLocating] = useState(false);
@@ -46,6 +47,11 @@ export default function MotherFacilitiesPage() {
 
   const { data, loading, error, retryable, run } = useAsync(() => facilityRepo.list(), { deps: [] });
   const facilities = useMemo<Facility[]>(() => data ?? [], [data]);
+
+  const districtOptions = useMemo(() => {
+    const base = province ? facilities.filter((facility) => facility.province === province) : facilities;
+    return Array.from(new Set(base.map((facility) => facility.district).filter(Boolean))).sort();
+  }, [facilities, province]);
 
   const myFacilityId = mother.pregnancy?.facilityId ?? actor?.facilityId ?? null;
   const myFacility = facilities.find((facility) => facility.id === myFacilityId) ?? null;
@@ -55,10 +61,11 @@ export default function MotherFacilitiesPage() {
     const rows = facilities
       .filter((facility) => (type ? facility.type === type : true))
       .filter((facility) => (province ? facility.province === province : true))
+      .filter((facility) => (district ? facility.district === district : true))
       .filter((facility) => (maternityOnly ? facility.hasMaternity : true))
       .filter((facility) =>
         needle
-          ? [facility.name, facility.city, facility.province, facility.address, ...facility.services, ...facility.maternalServices]
+          ? [facility.name, facility.district, facility.city, facility.province, facility.address, ...facility.services, ...facility.maternalServices]
               .join(' ')
               .toLowerCase()
               .includes(needle)
@@ -79,7 +86,7 @@ export default function MotherFacilitiesPage() {
         if (origin && a.km !== null && b.km !== null) return a.km - b.km;
         return Number(b.facility.verified) - Number(a.facility.verified) || a.facility.name.localeCompare(b.facility.name);
       });
-  }, [facilities, term, type, province, maternityOnly, origin, myFacilityId]);
+  }, [facilities, term, type, province, district, maternityOnly, origin, myFacilityId]);
 
   useEffect(() => {
     document.title = 'Facilities · Mama Care';
@@ -203,8 +210,8 @@ export default function MotherFacilitiesPage() {
       </Card>
 
       <Card className="card-pad">
-        <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)_minmax(0,1fr)]">
-          <div>
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-[minmax(0,2fr)_repeat(3,minmax(0,1fr))]">
+          <div className="sm:col-span-2 lg:col-span-1">
             <p className="label">Search</p>
             <SearchInput value={search} onValueChange={setSearch} placeholder="Search facility, town or service" />
           </div>
@@ -229,8 +236,22 @@ export default function MotherFacilitiesPage() {
             <Select
               id="my-facility-province"
               value={province}
-              onChange={(event) => setProvince(event.target.value)}
+              onChange={(event) => {
+                setProvince(event.target.value);
+                setDistrict('');
+              }}
               options={[{ value: '', label: 'All provinces' }, ...PROVINCES.map((item) => ({ value: item, label: item }))]}
+            />
+          </div>
+          <div>
+            <label className="label" htmlFor="my-facility-district">
+              District
+            </label>
+            <Select
+              id="my-facility-district"
+              value={district}
+              onChange={(event) => setDistrict(event.target.value)}
+              options={[{ value: '', label: province ? `All in ${province}` : 'All districts' }, ...districtOptions.map((item) => ({ value: item, label: item }))]}
             />
           </div>
         </div>

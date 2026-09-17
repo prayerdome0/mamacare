@@ -414,20 +414,49 @@ service cloud.firestore {
       // verification fields into an admin-only subcollection) before going live.
       allow list: if request.query.limit <= 500;
 
-      allow create: if accountInGoodStanding()
-        && (request.resource.data.userId == uid()
-              || (isFacilityAdmin() && request.resource.data.facilityId == myFacilityId()));
+      // Verification is decided by an administrator, never by the applicant.
+      // A record can therefore only be born `pending` — with no verification
+      // fields written — except on a deployment whose global settings document
+      // explicitly turns approvals off, where registration may create an
+      // already-approved record (still without a `verifiedBy` name, which only
+      // an administrator may stamp). Self-publishing a "verified" status is
+      // impossible either way.
+      function applicationsDisabled() {
+        return exists(/databases/$(database)/documents/settings/global)
+          && firestore.get(/databases/$(database)/documents/settings/global).data.providerApprovalsRequired == false;
+      }
+      function cleanApplication() {
+        return request.resource.data.verifiedBy == null
+          && request.resource.data.rejectionReason == null;
+      }
+      allow create: if isAdmin()
+        || (accountInGoodStanding()
+              && request.resource.data.userId == uid()
+              && cleanApplication()
+              && (request.resource.data.status == 'pending' && request.resource.data.verifiedAt == null
+                  || (applicationsDisabled() && request.resource.data.status == 'approved' && request.resource.data.verifiedAt != null)))
+        || (accountInGoodStanding()
+              && isFacilityAdmin()
+              && request.resource.data.facilityId == myFacilityId()
+              && cleanApplication()
+              && request.resource.data.status == 'pending'
+              && request.resource.data.verifiedAt == null);
 
       // Verification fields belong to an administrator; a clinician edits their own
-      // profile but cannot verify themselves.
+      // profile but cannot verify themselves. The one applicant-side status change
+      // that is allowed is a re-submission after a rejection: `rejected` back to
+      // `pending`, clearing the rejection reason. No path leads from the applicant
+      // to `approved` — only the administrator's update can do that.
       allow update: if isAdmin()
         || (accountInGoodStanding() && isFacilityAdmin() && resource.data.facilityId == myFacilityId())
         || (accountInGoodStanding() && resource.data.userId == uid()
-              && unchanged('status')
+              && unchanged('userId')
               && unchanged('verifiedBy')
               && unchanged('verifiedAt')
-              && unchanged('rejectionReason')
-              && unchanged('userId'));
+              && (unchanged('status') && unchanged('rejectionReason')
+                  || (resource.data.status == 'rejected'
+                      && request.resource.data.status == 'pending'
+                      && request.resource.data.rejectionReason == null)));
 
       allow delete: if isAdmin();
     }

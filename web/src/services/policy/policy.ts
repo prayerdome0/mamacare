@@ -37,15 +37,28 @@ const deny = (reason: string): Decision => ({ allowed: false, reason });
 
 let linkedPatientIds: Set<string> = new Set();
 let supporterPermissions: SupporterPermissions | null = null;
+/**
+ * Mirrors `settings/global.providerApprovalsRequired` (default true). A
+ * deployment that explicitly turns approvals off lets registration create an
+ * already-approved provider record; otherwise every new application starts
+ * pending and only an administrator can mark it verified.
+ */
+let providerApprovalsRequired = true;
 
-export function setPolicyContext(context: { linkedPatientIds?: Iterable<string>; supporterPermissions?: SupporterPermissions | null }): void {
+export function setPolicyContext(context: {
+  linkedPatientIds?: Iterable<string>;
+  supporterPermissions?: SupporterPermissions | null;
+  providerApprovalsRequired?: boolean;
+}): void {
   if (context.linkedPatientIds) linkedPatientIds = new Set(context.linkedPatientIds);
   if (context.supporterPermissions !== undefined) supporterPermissions = context.supporterPermissions;
+  if (context.providerApprovalsRequired !== undefined) providerApprovalsRequired = context.providerApprovalsRequired;
 }
 
 export const clearPolicyContext = (): void => {
   linkedPatientIds = new Set();
   supporterPermissions = null;
+  providerApprovalsRequired = true;
 };
 
 export const isLinkedPatient = (userId: string | null | undefined): boolean =>
@@ -94,6 +107,27 @@ const PROTECTED_USER_FIELDS = ['role', 'status', 'privilegeVersion', 'uid', 'cre
 
 /** Fields only an administrator may change on a provider record. */
 const PROTECTED_PROVIDER_FIELDS = ['status', 'verifiedBy', 'verifiedAt', 'rejectionReason', 'userId'];
+
+/** Everything else a clinician may edit about their own record. */
+const SAFE_PROVIDER_FIELDS: Record<string, boolean> = {
+  fullName: true,
+  title: true,
+  profession: true,
+  facilityId: true,
+  facilityName: true,
+  location: true,
+  licenseNumber: true,
+  qualifications: true,
+  supportingDocuments: true,
+  languages: true,
+  bio: true,
+  phone: true,
+  email: true,
+  photoUrl: true,
+  photoPublicId: true,
+  acceptingNewPatients: true,
+  listedInDirectory: true,
+};
 
 /* ── Reads ────────────────────────────────────────────────────────────── */
 
@@ -282,16 +316,47 @@ export function canWrite(
   if (name === 'providers') {
     const own = str(field(existing, 'userId')) === actor.uid;
     if (op === 'create') {
-      if (own || str(patch?.userId) === actor.uid) return allow;
-      if (isFacilityAdmin(actor) && field(patch, 'facilityId') === actor.facilityId) return allow;
+      // Verification is decided by an administrator, never by the applicant:
+      // a record can only be born `pending` with no verification fields,
+      // except on a deployment whose settings explicitly turn approvals off.
+      const status = str(patch?.status);
+      const clean = (patch?.verifiedBy ?? null) === null && (patch?.rejectionReason ?? null) === null;
+      const verifiedAt = patch?.verifiedAt ?? null;
+      if (str(patch?.userId) === actor.uid) {
+        if (status === 'pending' && clean && verifiedAt === null) return allow;
+        if (status === 'approved' && !providerApprovalsRequired && clean && verifiedAt !== null) return allow;
+        return deny('A provider application starts pending; only an administrator can mark it verified.');
+      }
+      if (
+        isFacilityAdmin(actor) &&
+        field(patch, 'facilityId') === actor.facilityId &&
+        status === 'pending' &&
+        clean &&
+        verifiedAt === null
+      ) {
+        return allow;
+      }
       return deny('You can only register your own provider profile.');
     }
     if (isFacilityAdmin(actor) && field(existing, 'facilityId') === actor.facilityId) return allow;
     if (own) {
       if (op === 'delete') return deny('Ask an administrator to remove a provider profile.');
       const touchesProtected = Object.keys(patch ?? {}).some((key) => PROTECTED_PROVIDER_FIELDS.includes(key));
-      if (touchesProtected) return deny('Verification is managed by an administrator.');
-      return allow;
+      if (!touchesProtected) return allow;
+      // The only applicant-side status change: re-submitting a rejected
+      // application (rejected -> pending, clearing the reason). Verification
+      // fields may only ever be written by an administrator.
+      const keys = Object.keys(patch ?? {});
+      const isResubmission =
+        str(field(existing, 'status')) === 'rejected' && str(patch?.status) === 'pending' && (patch?.rejectionReason ?? null) === null;
+      // `verifiedBy`/`verifiedAt` may appear in the patch only as explicit
+      // nulls (a no-op) — a value there would be an escalation attempt.
+      const verificationUntouched = (patch?.verifiedBy ?? null) === null && (patch?.verifiedAt ?? null) === null;
+      const onlyProfileOrResubmission = keys.every(
+        (key) => key in SAFE_PROVIDER_FIELDS || ['status', 'rejectionReason', 'verifiedBy', 'verifiedAt'].includes(key),
+      );
+      if (isResubmission && verificationUntouched && onlyProfileOrResubmission) return allow;
+      return deny('Verification is managed by an administrator.');
     }
     return deny('You cannot change this provider profile.');
   }

@@ -234,17 +234,33 @@ export default function ProvidersPage() {
             <Card className="card-pad">
               <h3 className="card-title">Are you a provider?</h3>
               <p className="mt-1 text-sm text-ink-600">
-                Register with your profession, facility and licence number. An administrator verifies your documents
-                before your profile becomes visible here.
+                Nurses, midwives, doctors and community health workers apply here. An administrator verifies your
+                registration before you carry the verified badge.
               </p>
               <div className="mt-3 flex flex-wrap gap-2">
-                <Button variant="primary" size="sm" onClick={() => navigate('/register?role=PROVIDER')}>
-                  Register as a provider
-                </Button>
-                <Button variant="secondary" size="sm" onClick={() => navigate('/how-it-works')}>
-                  How it works
-                </Button>
+                {actor && actor.role !== 'MOTHER' && actor.role !== 'SUPPORTER' ? (
+                  <Button variant="primary" size="sm" onClick={() => navigate('/provider/profile')}>
+                    Manage my provider profile
+                  </Button>
+                ) : (
+                  <>
+                    <Button variant="primary" size="sm" onClick={() => navigate(actor ? '/become-a-provider' : '/register?role=PROVIDER')}>
+                      {actor ? 'Apply with my account' : 'Register as a provider'}
+                    </Button>
+                    {actor ? (
+                      <Button variant="secondary" size="sm" onClick={() => navigate('/how-it-works')}>
+                        How it works
+                      </Button>
+                    ) : null}
+                  </>
+                )}
               </div>
+              {actor && (actor.role === 'MOTHER' || actor.role === 'SUPPORTER') ? (
+                <p className="mt-2 text-xs text-ink-500">
+                  Signed in as {actor.role === 'MOTHER' ? 'a mother' : 'a supporter'}? You can apply for nurse
+                  verification without creating another account.
+                </p>
+              ) : null}
             </Card>
           </div>
         </div>

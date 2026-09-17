@@ -39,6 +39,7 @@ export function FacilityCard({
           <p className="mt-1.5 flex items-start gap-1.5 text-sm text-ink-600">
             <MapPin className="mt-0.5 size-4 shrink-0 text-ink-400" aria-hidden />
             <span>
+              {facility.district ? `${facility.district} District · ` : ''}
               {facility.address}, {facility.city}
               {facility.province ? `, ${facility.province}` : ''}
               {distanceKm !== null && distanceKm !== undefined ? (
@@ -46,6 +47,9 @@ export function FacilityCard({
               ) : null}
             </span>
           </p>
+          {facility.description ? (
+            <p className="mt-1.5 max-w-xl text-[0.8rem] leading-snug text-ink-500">{facility.description}</p>
+          ) : null}
         </div>
 
         <div className="flex shrink-0 flex-col items-end gap-1.5">

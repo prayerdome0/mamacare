@@ -334,7 +334,13 @@ export default function RegisterPage() {
           </Field>
 
           <FieldGrid columns={2}>
-            <Field label="Password" htmlFor="password" error={errors.password} required hint="8+ characters, a letter and a number.">
+            <Field
+              label="Password"
+              htmlFor="password"
+              error={errors.password}
+              required
+              hint="10+ characters, including a capital letter and a number."
+            >
               <PasswordInput
                 id="password"
                 autoComplete="new-password"

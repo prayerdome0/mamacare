@@ -8,23 +8,28 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   BadgeCheck,
   Building2,
   CheckCircle2,
   Eye,
   EyeOff,
+  ExternalLink,
+  FileText,
   RefreshCw,
   ShieldAlert,
   Stethoscope,
   XCircle,
 } from 'lucide-react';
 import { useAsync } from '@/hooks';
-import { facilityRepo, profileRepo, providerRepo } from '@/services/repositories';
+import { facilityRepo, notificationRepo, profileRepo, providerRepo } from '@/services/repositories';
+import { services } from '@/services/session-store';
 import { logAudit } from '@/services/audit';
+import { openDocument } from '@/services/media/media-service';
 import { useConfirm, useSession } from '@/providers/app-providers';
 import { formatDate, relativeTime } from '@/lib/utils';
-import { PROFESSION_LABELS, type Facility, type HealthcareProvider, type Profession, type ProviderStatus } from '@/types/domain';
+import { PROFESSION_LABELS, type DocumentRecord, type Facility, type HealthcareProvider, type Profession, type ProviderStatus } from '@/types/domain';
 import { StaffPageHeader, StaffShell } from '@/components/layout/staff-shell';
 import { Button } from '@/components/ui/button';
 import { Card, KeyValue, SectionHeading, StatCard } from '@/components/ui/card';
@@ -49,11 +54,23 @@ const STATUS_TONES: Record<ProviderStatus, 'amber' | 'green' | 'red' | 'neutral'
   suspended: 'neutral',
 };
 
+const STATUS_FROM_PARAM: Record<string, ProviderStatus | 'ALL'> = {
+  pending: 'pending',
+  approved: 'approved',
+  rejected: 'rejected',
+  suspended: 'suspended',
+  all: 'ALL',
+};
+
 export default function AdminProviders() {
   const { actor } = useSession();
   const toast = useToast();
   const confirm = useConfirm();
-  const [status, setStatus] = useState<ProviderStatus | 'ALL'>('pending');
+  const [searchParams] = useSearchParams();
+  // `?status=approved` (the "Verified nurses" nav item) selects the starting view.
+  const [status, setStatus] = useState<ProviderStatus | 'ALL'>(
+    STATUS_FROM_PARAM[searchParams.get('status')?.toLowerCase() ?? ''] ?? 'pending',
+  );
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<HealthcareProvider | null>(null);
   const [rejectFor, setRejectFor] = useState<HealthcareProvider | null>(null);
@@ -93,16 +110,39 @@ export default function AdminProviders() {
   const approve = async (provider: HealthcareProvider): Promise<void> => {
     const ok = await confirm({
       title: `Verify ${provider.fullName}?`,
-      message: `Confirm you checked the licence${provider.licenseNumber ? ` (${provider.licenseNumber})` : ' — none was provided'} and that ${provider.facilityName} is a real facility. Verified providers appear in the public directory and mothers can link their care to them.`,
+      message: `Confirm you checked the licence${provider.licenseNumber ? ` (${provider.licenseNumber})` : ' — none was provided'} and that ${provider.facilityName} is a real facility. Approving grants the healthcare-provider role on their account and the verified badge.`,
       confirmLabel: 'Approve and verify',
     });
     if (!ok) return;
     await providerRepo.approve(provider.id, actor?.displayName ?? 'Administrator');
-    const account = await profileRepo.list(1000).then((result) => result.rows.find((user) => user.uid === provider.userId) ?? null);
-    if (account && account.status === 'PENDING_APPROVAL') {
-      await profileRepo.adminUpdate(account.uid, { status: 'ACTIVE' });
+    // The application was verified: the person's account becomes a provider.
+    // This is the only place a nurse role is granted — an applicant cannot
+    // reach these writes (the rules keep role, status and providerId locked
+    // for the account owner), and every step is in the audit log.
+    if (provider.userId) {
+      const account = await profileRepo.byUid(provider.userId).catch(() => null);
+      if (account) {
+        await profileRepo
+          .adminUpdate(provider.userId, {
+            role: 'PROVIDER',
+            status: 'ACTIVE',
+            providerId: provider.id,
+            facilityId: provider.facilityId ?? account.facilityId,
+            privilegeVersion: (account.privilegeVersion ?? 1) + 1,
+          })
+          .catch(() => undefined);
+        await notificationRepo
+          .push({
+            userId: provider.userId,
+            kind: 'system',
+            title: 'Your nurse application has been approved',
+            body: `${provider.fullName.split(' ')[0]}, your registration has been verified. You now have the healthcare provider portal and the verified badge. Open it from your account.`,
+            link: '/provider',
+          })
+          .catch(() => undefined);
+      }
     }
-    toast.success('Provider verified', account ? 'Their account is now active.' : undefined);
+    toast.success('Provider verified', 'Their account now carries the nurse role and the verified badge.');
     void run();
   };
 
@@ -180,8 +220,8 @@ export default function AdminProviders() {
   return (
     <StaffShell portal="Admin Dashboard">
       <StaffPageHeader
-        title="Providers"
-        description="Verification queue and directory control. A verified provider is a public claim about a real clinician — check before you approve."
+        title="Nurse applications"
+        description="The queue that decides who is allowed to claim the verified badge. Approving grants the provider role on the applicant's account and is logged; a verified provider is a public claim about a real clinician — check the licence first."
         actions={
           <Button variant="ghost" size="sm" onClick={() => void run()} icon={<RefreshCw className="size-4" aria-hidden />}>
             Refresh
@@ -259,6 +299,7 @@ export default function AdminProviders() {
           setSelected(null);
           void run();
         }}
+        onApproved={(provider) => void approve(provider)}
       />
 
       <RejectModal
@@ -303,9 +344,24 @@ function RejectModal({
     setBusy(true);
     try {
       await providerRepo.reject(provider.id, reason.trim(), actor?.displayName ?? 'Administrator');
-      const account = await profileRepo.list(1000).then((result) => result.rows.find((user) => user.uid === provider.userId) ?? null);
-      if (account && account.status !== 'CLOSED') {
-        await profileRepo.adminUpdate(account.uid, { status: 'PENDING_APPROVAL' });
+      const account = provider.userId ? await profileRepo.byUid(provider.userId).catch(() => null) : null;
+      // Accounts that registered directly as providers are parked at the
+      // pending screen; applicants who started as mothers/supporters keep their
+      // existing account and role exactly as it was — rejection only affects
+      // the application, never the person's other access.
+      if (account && account.role === 'PROVIDER' && account.status !== 'CLOSED') {
+        await profileRepo.adminUpdate(account.uid, { status: 'PENDING_APPROVAL' }).catch(() => undefined);
+      }
+      if (account) {
+        await notificationRepo
+          .push({
+            userId: account.uid,
+            kind: 'system',
+            title: 'Your nurse application was not approved',
+            body: `Reason given: ${reason.trim()} You can correct the details and apply again from “Become a verified nurse”.`,
+            link: '/become-a-provider',
+          })
+          .catch(() => undefined);
       }
       onDone();
     } catch (cause) {
@@ -356,11 +412,13 @@ function ManageProviderModal({
   facilities,
   onClose,
   onSaved,
+  onApproved,
 }: {
   provider: HealthcareProvider | null;
   facilities: Facility[];
   onClose: () => void;
   onSaved: () => void;
+  onApproved: (provider: HealthcareProvider) => void;
 }) {
   const { actor } = useSession();
   const toast = useToast();
@@ -377,6 +435,7 @@ function ManageProviderModal({
   const [listed, setListed] = useState(true);
   const [accepting, setAccepting] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [documents, setDocuments] = useState<DocumentRecord[] | null>(null);
 
   useEffect(() => {
     if (!provider) return;
@@ -392,6 +451,21 @@ function ManageProviderModal({
     setBio(provider.bio ?? '');
     setListed(provider.listedInDirectory);
     setAccepting(provider.acceptingNewPatients);
+    setDocuments(null);
+    // Supporting documents live under the applicant's own document records;
+    // administrators are the only ones allowed to read them.
+    if (provider.supportingDocuments.length > 0) {
+      let cancelled = false;
+      void (async () => {
+        const rows = await Promise.all(
+          provider.supportingDocuments.map((id) => services().data.get('documents', id).catch(() => null)),
+        );
+        if (!cancelled) setDocuments(rows.filter((row): row is DocumentRecord => row !== null));
+      })();
+      return () => {
+        cancelled = true;
+      };
+    }
   }, [provider]);
 
   if (!provider) return null;
@@ -441,14 +515,12 @@ function ManageProviderModal({
     }
   };
 
-  const verify = async (): Promise<void> => {
-    setBusy(true);
+  const openSupportingDocument = async (record: DocumentRecord): Promise<void> => {
     try {
-      await providerRepo.approve(provider.id, actor?.displayName ?? 'Administrator');
-      toast.success('Provider verified');
-      onSaved();
-    } finally {
-      setBusy(false);
+      const url = await openDocument(record, { purpose: 'view' });
+      window.open(url, '_blank', 'noopener');
+    } catch (cause) {
+      toast.error('Document could not be opened', cause instanceof Error ? cause.message : undefined);
     }
   };
 
@@ -466,8 +538,8 @@ function ManageProviderModal({
             {provider.status === 'suspended' ? 'Reinstate' : 'Suspend'}
           </Button>
           {provider.status !== 'approved' ? (
-            <Button variant="secondary" onClick={() => void verify()} disabled={busy} icon={<BadgeCheck className="size-4" aria-hidden />}>
-              Verify
+            <Button variant="secondary" onClick={() => onApproved(provider)} disabled={busy} icon={<BadgeCheck className="size-4" aria-hidden />}>
+              Approve & verify
             </Button>
           ) : null}
           <Button onClick={() => void save()} loading={busy}>Save changes</Button>
@@ -547,6 +619,60 @@ function ManageProviderModal({
         <Field label="Biography" htmlFor="mp-bio" hint="Shown publicly. No patient details.">
           <TextArea id="mp-bio" rows={3} value={bio} onChange={(event) => setBio(event.target.value)} />
         </Field>
+
+        {(provider.location || provider.qualifications) ? (
+          <Card className="card-pad border-ink-200 bg-ink-50">
+            <p className="micro">From the application</p>
+            <dl className="mt-2 grid gap-x-6 gap-y-1.5 text-sm sm:grid-cols-2">
+              {provider.location ? (
+                <div className="flex items-start justify-between gap-3">
+                  <dt className="text-ink-500">Location</dt>
+                  <dd className="text-right font-medium text-ink-800">{provider.location}</dd>
+                </div>
+              ) : null}
+              {provider.qualifications ? (
+                <div className="sm:col-span-2">
+                  <dt className="text-ink-500">Qualifications</dt>
+                  <dd className="mt-1 leading-relaxed text-ink-800">{provider.qualifications}</dd>
+                </div>
+              ) : null}
+            </dl>
+          </Card>
+        ) : null}
+
+        {provider.supportingDocuments.length > 0 ? (
+          <div className="rounded-lg border border-ink-200 p-3">
+            <p className="micro">Supporting documents</p>
+            {documents === null ? (
+              <p className="mt-2 text-xs text-ink-500">Loading…</p>
+            ) : documents.length === 0 ? (
+              <p className="mt-2 text-xs text-ink-500">Attached documents could not be loaded. They may have been removed.</p>
+            ) : (
+              <ul className="mt-2 space-y-1.5">
+                {documents.map((record) => (
+                  <li key={record.id} className="flex items-center justify-between gap-3 rounded-md bg-ink-100 px-3 py-2 text-sm">
+                    <span className="flex min-w-0 items-center gap-2 text-ink-800">
+                      <FileText className="size-4 shrink-0 text-ink-400" aria-hidden />
+                      <span className="min-w-0 truncate">{record.title}</span>
+                    </span>
+                    <button
+                      type="button"
+                      className="flex shrink-0 items-center gap-1 text-xs font-semibold text-brand-800 hover:underline"
+                      onClick={() => void openSupportingDocument(record)}
+                    >
+                      <ExternalLink className="size-3.5" aria-hidden />
+                      Open
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <p className="mt-2 text-xs text-ink-500">
+              Private documents — readable here because you are an administrator. Anyone else, including a clinician,
+              cannot open them.
+            </p>
+          </div>
+        ) : null}
 
         <div className="space-y-3 rounded-lg border border-ink-200 p-3">
           <CheckboxRow

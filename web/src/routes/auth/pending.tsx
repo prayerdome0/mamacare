@@ -73,12 +73,18 @@ export default function PendingApprovalPage() {
                 {provider?.rejectionReason ? <> Reason given: <strong>{provider.rejectionReason}</strong>.</> : null}
               </p>
               <p className="mt-3 text-sm text-ink-600">
-                If you believe this is a mistake — a typo in your licence number, or documents that did not upload — write to{' '}
+                You can correct the details and submit the application again — or, if you believe this is a mistake,
+                write to{' '}
                 <a href={`mailto:${SITE.org.email}`} className="font-medium text-brand-800 hover:underline">
                   {SITE.org.email}
                 </a>{' '}
-                with your full name, profession and licence number, and the application will be reviewed again.
+                with your full name, profession and licence number.
               </p>
+              <div className="mt-4">
+                <Link to="/become-a-provider" className="btn btn-primary btn-sm">
+                  Correct the details and apply again
+                </Link>
+              </div>
             </>
           ) : (
             <>

@@ -413,10 +413,12 @@ function FacilityModal({
   const form = useForm<FacilityValues>(facilitySchema, {
     name: '',
     type: 'clinic',
+    district: '',
     address: '',
     city: '',
     province: 'Lusaka',
     country: 'ZM',
+    description: '',
     phone: '',
     emergencyPhone: '',
     latitude: undefined,
@@ -434,10 +436,12 @@ function FacilityModal({
     form.reset({
       name: facility?.name ?? '',
       type: facility?.type ?? 'clinic',
+      district: facility?.district ?? '',
       address: facility?.address ?? '',
       city: facility?.city ?? '',
       province: facility?.province ?? 'Lusaka',
       country: facility?.country ?? 'ZM',
+      description: facility?.description ?? '',
       phone: facility?.phone ?? '',
       emergencyPhone: facility?.emergencyPhone ?? '',
       latitude: facility?.latitude ?? undefined,
@@ -461,10 +465,12 @@ function FacilityModal({
       const payload = {
         name: values.name,
         type: values.type,
+        district: values.district?.trim() || values.city,
         address: values.address,
         city: values.city,
         province: values.province,
         country: values.country,
+        description: values.description?.trim() || null,
         phone: values.phone?.trim() || null,
         emergencyPhone: values.emergencyPhone?.trim() || null,
         latitude: values.latitude ?? null,
@@ -533,9 +539,15 @@ function FacilityModal({
         <Field label="Address" htmlFor="fa-address" required error={form.errors.address} hint="Landmarks help more than street numbers in many towns.">
           <TextInput id="fa-address" value={form.values.address} onValueChange={(value) => form.setField('address', value)} invalid={Boolean(form.errors.address)} />
         </Field>
-        <FieldGrid columns={3}>
+        <Field label="Description" htmlFor="fa-description" optional error={form.errors.description} hint="One or two factual sentences — when it was built, what it is known for. Only write what you can verify.">
+          <TextArea id="fa-description" rows={2} value={form.values.description} onValueChange={(value) => form.setField('description', value)} />
+        </Field>
+        <FieldGrid columns={4}>
           <Field label="City or town" htmlFor="fa-city" required error={form.errors.city}>
             <TextInput id="fa-city" value={form.values.city} onValueChange={(value) => form.setField('city', value)} invalid={Boolean(form.errors.city)} />
+          </Field>
+          <Field label="District" htmlFor="fa-district" required error={form.errors.district} hint="Used for district search.">
+            <TextInput id="fa-district" value={form.values.district} onValueChange={(value) => form.setField('district', value)} onBlur={() => form.blur('district')} invalid={Boolean(form.errors.district)} placeholder="e.g. Chama" />
           </Field>
           <Field label="Province" htmlFor="fa-province" required error={form.errors.province}>
             <Select
