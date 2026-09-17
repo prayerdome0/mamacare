@@ -74,6 +74,9 @@ export const profileRepo = {
 
   list: (limit = 200) => data().list('users', { orderBy: { field: 'createdAt', direction: 'desc' }, limit }),
 
+  /** Read one account by its user id (administrative context). */
+  byUid: (uid: string) => data().get('users', uid),
+
   /**
    * Administrator-only update of another account. The data layer still enforces the
    * role check, so this cannot be used by a mother to promote herself.
@@ -478,6 +481,72 @@ export const providerRepo = {
 
   create: (input: Omit<HealthcareProvider, 'id' | 'createdAt' | 'updatedAt'>) => data().create('providers', input),
   update: (id: string, patch: Partial<HealthcareProvider>) => data().update('providers', id, patch),
+
+  /**
+   * Submit (or resubmit) a nurse/provider application for the signed-in user.
+   *
+   * The application is the user's own `providers` record in `pending` state —
+   * the same record an administrator approves. A user can therefore never
+   * "become a nurse" on their own: until an administrator flips `status` to
+   * approved and the profile is updated, the record carries no privilege.
+   * Resubmitting after a rejection updates the existing record so there is at
+   * most one application per person.
+   */
+  async apply(input: {
+    fullName: string;
+    email: string;
+    phone: string | null;
+    location: string;
+    facilityId: string | null;
+    facilityName: string;
+    profession: HealthcareProvider['profession'];
+    licenseNumber: string;
+    qualifications: string | null;
+    supportingDocumentIds?: string[];
+  }): Promise<HealthcareProvider> {
+    const me = requireActor();
+    const existing = await providerRepo.mine();
+    const nowIso = new Date().toISOString();
+    const fields = {
+      fullName: input.fullName.trim(),
+      email: input.email.trim(),
+      phone: input.phone?.trim() || null,
+      location: input.location.trim(),
+      facilityId: input.facilityId,
+      facilityName: input.facilityName.trim(),
+      profession: input.profession,
+      licenseNumber: input.licenseNumber.trim(),
+      qualifications: input.qualifications?.trim() || null,
+      supportingDocuments: input.supportingDocumentIds ?? existing?.supportingDocuments ?? [],
+      status: 'pending' as const,
+      verifiedBy: null,
+      verifiedAt: null,
+      rejectionReason: null,
+    };
+    if (existing) {
+      const updated = await data().update('providers', existing.id, fields);
+      await logAudit('record-update', 'providers', existing.id, `Re-submitted application for ${updated.fullName}`);
+      return updated;
+    }
+    const created = await data().create('providers', {
+      userId: me.uid,
+      title: null,
+      languages: ['English'],
+      bio: null,
+      photoUrl: null,
+      photoPublicId: null,
+      acceptingNewPatients: false,
+      listedInDirectory: false,
+      createdAt: nowIso,
+      ...fields,
+    } as Omit<HealthcareProvider, 'id'>);
+    // Link the profile to the application; the rules keep this field owner-locked
+    // here, but the link is what lets "which of my records is my application?"
+    // stay a single query.
+    await data().update('users', me.uid, { providerId: created.id }).catch(() => undefined);
+    await logAudit('record-create', 'providers', created.id, `Nurse application submitted for ${created.fullName}`);
+    return created;
+  },
 
   async approve(id: string, byName: string): Promise<HealthcareProvider> {
     const provider = await data().update('providers', id, {

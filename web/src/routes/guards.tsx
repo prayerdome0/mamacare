@@ -54,7 +54,14 @@ export function RequireAuth({
     return <Navigate to="/sign-in" replace state={{ from: location.pathname + location.search }} />;
   }
   // A provider waiting for verification lands on the holding page, not the portal.
-  if (actor.role === 'PROVIDER' && actor.status === 'PENDING_APPROVAL' && location.pathname !== '/pending') {
+  // The application screen is the one place they can also go: it shows the status
+  // and the only legitimate resubmission path after a rejection.
+  if (
+    actor.role === 'PROVIDER' &&
+    actor.status === 'PENDING_APPROVAL' &&
+    location.pathname !== '/pending' &&
+    location.pathname !== '/become-a-provider'
+  ) {
     return <Navigate to="/pending" replace />;
   }
   if (roles && !roles.includes(actor.role)) return <Navigate to={homeForRole(actor.role)} replace />;

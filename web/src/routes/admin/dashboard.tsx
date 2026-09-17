@@ -13,6 +13,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import {
   Activity,
   AlertTriangle,
+  BadgeCheck,
   Newspaper as ArticleIcon,
   Building2,
   CalendarDays,
@@ -105,6 +106,7 @@ export default function AdminDashboard() {
       byRole,
       mothers: byRole.MOTHER ?? 0,
       pendingProviders: pendingProviders.length,
+      verifiedProviders: providerList.filter((provider) => provider.status === 'approved').length,
       rejectedProviders: rejectedProviders.length,
       suspendedUsers: suspendedUsers.length,
       drafts: drafts.length,
@@ -243,7 +245,8 @@ export default function AdminDashboard() {
         />
       </div>
 
-      <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
+        <StatCard label="Verified nurses" value={stats.verifiedProviders} icon={<BadgeCheck className="size-4" aria-hidden />} tone="green" onClick={() => navigate('/admin/providers?status=approved')} />
         <StatCard label="Facilities" value={stats.facilities} icon={<Building2 className="size-4" aria-hidden />} hint={`${stats.unverifiedFacilities} unverified`} onClick={() => navigate('/admin/facilities')} />
         <StatCard label="Articles & drafts" value={articleList.length} icon={<ArticleIcon className="size-4" aria-hidden />} hint={`${stats.drafts} drafts`} onClick={() => navigate('/admin/articles')} />
         <StatCard label="Appointments today" value={stats.todayAppointments} icon={<CalendarDays className="size-4" aria-hidden />} onClick={() => navigate('/admin/appointments')} />

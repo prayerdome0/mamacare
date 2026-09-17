@@ -9,17 +9,17 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Download, Eye, FileText, Lock, Pencil, ShieldCheck, Trash2, Upload, UserRound } from 'lucide-react';
+import { BadgeCheck, Download, Eye, FileText, Lock, Pencil, ShieldCheck, Stethoscope, Trash2, Upload, UserRound } from 'lucide-react';
 import {useAsync} from '@/hooks';
 import { useMotherContext } from '@/hooks/use-mother';
-import { careLinkRepo, profileRepo, supporterRepo } from '@/services/repositories';
+import { careLinkRepo, profileRepo, providerRepo, supporterRepo } from '@/services/repositories';
 import { deleteDocument, listDocuments, openDocument, uploadDocument, DOCUMENT_CATEGORIES } from '@/services/media/media-service';
 import { useConfirm, useSession } from '@/providers/app-providers';
 import { logAudit } from '@/services/audit';
 import { profileSchema, validate, validateFile, DOCUMENT_ACCEPTED_MIME, MAX_DOCUMENT_BYTES } from '@/lib/validation';
 import { COUNTRIES, countryOptions } from '@/config/geo';
 import { formatDate, formatBytes } from '@/lib/utils';
-import { LANGUAGES, type DocumentRecord, type LanguageCode } from '@/types/domain';
+import { LANGUAGES, PROFESSION_LABELS, type DocumentRecord, type LanguageCode } from '@/types/domain';
 import { AppShell, PageHeader } from '@/components/layout/app-shell';
 import { ImageUploader, type ImageUploadResult } from '@/components/media/image-uploader';
 import { Button } from '@/components/ui/button';
@@ -48,6 +48,18 @@ export default function ProfilePage() {
   });
   const { data: careLinks } = useAsync(() => careLinkRepo.mine(), { deps: [actor?.uid] });
   const { data: supporters } = useAsync(() => supporterRepo.list(actor?.uid ?? ''), { deps: [actor?.uid], immediate: Boolean(actor) });
+  const { data: myProvider } = useAsync(() => providerRepo.mine(), { deps: [actor?.uid], immediate: Boolean(actor) });
+
+  /**
+   * The verified badge is derived from the provider record an administrator
+   * approved — never from a field the account can edit itself.
+   */
+  const verifiedLabel =
+    myProvider?.status === 'approved'
+      ? myProvider.profession === 'nurse'
+        ? 'Verified nurse'
+        : `Verified ${PROFESSION_LABELS[myProvider.profession]}`
+      : null;
 
   const rows = useMemo<DocumentRecord[]>(() => documents ?? [], [documents]);
 
@@ -128,6 +140,11 @@ export default function ProfilePage() {
                 <p className="mt-0.5 text-sm text-ink-600">{actor?.email}</p>
                 <div className="mt-2 flex flex-wrap gap-1.5">
                   <Badge tone="brand">{actor?.role === 'MOTHER' ? 'Mother' : actor?.role === 'SUPPORTER' ? 'Supporter' : actor?.role ?? ''}</Badge>
+                  {verifiedLabel ? (
+                    <Badge tone="green">
+                      <BadgeCheck className="size-3" aria-hidden /> {verifiedLabel}
+                    </Badge>
+                  ) : null}
                   <Badge tone="neutral">{COUNTRIES.find((country) => country.code === (profile?.country ?? 'ZM'))?.name ?? profile?.country}</Badge>
                   {profile?.createdAt ? <Badge tone="neutral">Joined {formatDate(profile.createdAt, 'day')}</Badge> : null}
                 </div>
@@ -220,6 +237,46 @@ export default function ProfilePage() {
                 </Link>
               </div>
             </div>
+          </Card>
+
+          <Card className="card-pad">
+            <SectionHeading eyebrow="Healthcare professional" title="Nurse / provider verification" />
+            {myProvider ? (
+              <>
+                <p className="mt-2 text-sm leading-relaxed text-ink-600">
+                  {myProvider.status === 'pending'
+                    ? `Your application as ${PROFESSION_LABELS[myProvider.profession]} at ${myProvider.facilityName} is awaiting verification by an administrator.`
+                    : myProvider.status === 'approved'
+                      ? `You are verified as ${PROFESSION_LABELS[myProvider.profession]} at ${myProvider.facilityName}. Your profile carries the verified badge in the public directory.`
+                      : myProvider.status === 'rejected'
+                        ? `Your application was not approved${myProvider.rejectionReason ? `: ${myProvider.rejectionReason}` : '.'} You can correct the details and apply again.`
+                        : `Your provider access is suspended${myProvider.rejectionReason ? `: ${myProvider.rejectionReason}` : ''}.`}
+                </p>
+                <div className="mt-3 actions-wrap">
+                  <Link to="/become-a-provider" className="btn btn-secondary btn-sm">
+                    {myProvider.status === 'pending' ? 'See application status' : 'Manage application'}
+                  </Link>
+                  {myProvider.status === 'approved' ? (
+                    <Link to="/provider" className="btn btn-ghost btn-sm">
+                      Open the healthcare portal
+                    </Link>
+                  ) : null}
+                </div>
+              </>
+            ) : (
+              <>
+                <p className="mt-2 text-sm leading-relaxed text-ink-600">
+                  Are you a nurse, midwife, doctor, or community health worker? Apply for verification to join the
+                  healthcare provider portal and be listed in the public directory. An administrator checks your
+                  registration before any verified status is granted.
+                </p>
+                <div className="mt-3 actions-wrap">
+                  <Link to="/become-a-provider" className="btn btn-primary btn-sm">
+                    <Stethoscope className="size-4" aria-hidden /> Apply to become a verified nurse
+                  </Link>
+                </div>
+              </>
+            )}
           </Card>
         </div>
 

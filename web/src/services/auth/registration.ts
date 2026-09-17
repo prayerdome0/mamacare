@@ -24,6 +24,7 @@ import { firebaseAuth } from '@/services/auth/firebase-auth';
 import { services } from '@/services/session-store';
 import { logAudit } from '@/services/audit';
 import { COUNTRIES } from '@/config/geo';
+import { setPolicyContext } from '@/services/policy/policy';
 import type { Actor } from '@/services/data/contract';
 import { DEFAULT_NOTIFICATION_PREFS } from '@/types/domain';
 import type { HealthcareProvider, LanguageCode, Profession, Role, UserProfile } from '@/types/domain';
@@ -151,6 +152,11 @@ export async function register(input: RegistrationInput, options: RegisterOption
 
   /* Provider directory record. */
   if (parsed.role === 'PROVIDER' && parsed.profession) {
+    // The device policy mirrors the Firestore rule that provider records are
+    // born `pending`; the settings flag is published explicitly here because
+    // the registration flow is the one place an approved record may be born,
+    // and only on deployments that have turned approvals off.
+    setPolicyContext({ providerApprovalsRequired: requiresApproval });
     const provider = await registry.data.create('providers', {
       userId: actor.uid,
       fullName: parsed.fullName,

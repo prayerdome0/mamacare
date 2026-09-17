@@ -12,6 +12,7 @@ import { cn } from '@/lib/utils';
 import { SITE, EMERGENCY_CONTACTS, MEDICAL_DISCLAIMER, FOOTER_LINKS } from '@/config/site-content';
 import { Button, ButtonLink } from '@/components/ui/button';
 import { Wordmark } from '@/components/layout/wordmark';
+import { VitalsBand } from '@/components/layout/vitals-band';
 import { useSession } from '@/providers/app-providers';
 
 const NAV = [
@@ -55,7 +56,7 @@ export function PublicShell({ children }: { children: ReactNode }) {
       <header className="sticky top-0 z-40 border-b border-ink-200 bg-white/92 backdrop-blur">
         <div className="shell flex h-[68px] items-center justify-between gap-4">
           <Link to="/" aria-label={`${SITE.name} home`}>
-            <Wordmark />
+            <Wordmark beat />
           </Link>
 
           <nav className="hidden items-center gap-1 lg:flex" aria-label="Main">
@@ -188,7 +189,8 @@ export function PublicHero({
   image?: ReactNode;
 }) {
   return (
-    <section className="border-b border-ink-200 bg-gradient-to-b from-brand-50/70 to-white">
+    <section className="overflow-hidden border-b border-ink-200 bg-gradient-to-b from-brand-50/70 to-white">
+      <VitalsBand />
       <div className={cn('shell grid items-center gap-10 py-14 sm:py-16', image ? 'lg:grid-cols-2' : '')}>
         <div>
           {eyebrow ? <p className="section-eyebrow">{eyebrow}</p> : null}

@@ -39,6 +39,10 @@ import { Field, FieldGrid, PasswordInput, Select, Switch, TextArea, TextInput } 
 import { Modal } from '@/components/ui/overlay';
 import { useToast } from '@/components/ui/toast';
 
+/** "Verified nurse" for nurses, "Verified <profession>" for everyone else. */
+const verifiedLabel = (profession: HealthcareProvider['profession']): string =>
+  profession === 'nurse' ? 'Verified nurse' : `Verified ${PROFESSION_LABELS[profession]}`;
+
 const STATUS_COPY: Record<HealthcareProvider['status'], { label: string; tone: 'green' | 'amber' | 'red' | 'neutral'; body: string }> = {
   approved: {
     label: 'Verified',
@@ -195,7 +199,14 @@ export default function ProviderProfile() {
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-2">
                   <h3 className="card-title">{provider.fullName}</h3>
-                  {status ? <Badge tone={status.tone}>{status.label}</Badge> : null}
+                  {status ? (
+                    <Badge tone={status.tone}>
+                      {provider.status === 'approved' ? (
+                        <BadgeCheck className="size-3" aria-hidden />
+                      ) : null}
+                      {provider.status === 'approved' ? verifiedLabel(provider.profession) : status.label}
+                    </Badge>
+                  ) : null}
                   {provider.acceptingNewPatients ? <Badge tone="green">Accepting patients</Badge> : <Badge tone="neutral">Not accepting</Badge>}
                 </div>
                 <p className="mt-1 text-sm text-ink-600">
@@ -275,7 +286,7 @@ export default function ProviderProfile() {
 
         <div className="space-y-4">
           <Card className="card-pad">
-            <SectionHeading eyebrow="Verification" title={status?.label ?? 'Unknown'} />
+            <SectionHeading eyebrow="Verification" title={provider.status === 'approved' ? verifiedLabel(provider.profession) : status?.label ?? 'Unknown'} />
             <p className="mt-2 text-sm text-ink-600">{status?.body}</p>
             {provider.verifiedAt ? (
               <p className="mt-2 flex items-center gap-2 text-sm text-ink-700">

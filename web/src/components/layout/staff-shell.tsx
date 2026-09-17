@@ -11,6 +11,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import {
   AlertTriangle,
+  BadgeCheck,
   Bell,
   CalendarDays,
   FileText,
@@ -54,7 +55,8 @@ export const PROVIDER_NAV: StaffNavItem[] = [
 export const ADMIN_NAV: StaffNavItem[] = [
   { to: '/admin', label: 'Dashboard', icon: LayoutDashboard },
   { to: '/admin/users', label: 'Users', icon: Users },
-  { to: '/admin/providers', label: 'Healthcare providers', icon: Stethoscope },
+  { to: '/admin/providers', label: 'Nurse applications', icon: Stethoscope },
+  { to: '/admin/providers?status=approved', label: 'Verified nurses', icon: BadgeCheck },
   { to: '/admin/facilities', label: 'Hospitals & clinics', icon: FolderOpen },
   { to: '/admin/articles', label: 'Education content', icon: FileText },
   { to: '/admin/announcements', label: 'Announcements', icon: Megaphone },

@@ -42,6 +42,7 @@ export default function FacilitiesPage() {
   const term = useDebouncedValue(search, 200);
   const [type, setType] = useState<FacilityType | ''>('');
   const [province, setProvince] = useState('');
+  const [district, setDistrict] = useState('');
   const [maternityOnly, setMaternityOnly] = useState(false);
   const [emergencyOnly, setEmergencyOnly] = useState(false);
   const [verifiedOnly, setVerifiedOnly] = useState(false);
@@ -51,11 +52,18 @@ export default function FacilitiesPage() {
 
   const facilities = useMemo<Facility[]>(() => data ?? [], [data]);
 
+  /** Districts that exist in the directory, narrowed to the chosen province. */
+  const districtOptions = useMemo(() => {
+    const base = province ? facilities.filter((facility) => facility.province === province) : facilities;
+    return Array.from(new Set(base.map((facility) => facility.district).filter(Boolean))).sort();
+  }, [facilities, province]);
+
   const results = useMemo(() => {
     const needle = term.trim().toLowerCase();
     const rows = facilities
       .filter((facility) => (type ? facility.type === type : true))
       .filter((facility) => (province ? facility.province === province : true))
+      .filter((facility) => (district ? facility.district === district : true))
       .filter((facility) => (maternityOnly ? facility.hasMaternity : true))
       .filter((facility) => (emergencyOnly ? facility.has24HourEmergency : true))
       .filter((facility) => (verifiedOnly ? facility.verified : true))
@@ -81,7 +89,7 @@ export default function FacilitiesPage() {
       if (origin && a.km !== null && b.km !== null) return a.km - b.km;
       return a.facility.name.localeCompare(b.facility.name);
     });
-  }, [facilities, term, type, province, maternityOnly, emergencyOnly, verifiedOnly, origin]);
+  }, [facilities, term, type, province, district, maternityOnly, emergencyOnly, verifiedOnly, origin]);
 
   useEffect(() => {
     document.title = 'Find a facility · Mama Care';
@@ -126,8 +134,8 @@ export default function FacilitiesPage() {
 
       <section className="shell py-8">
         <Card className="card-pad">
-          <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)_minmax(0,1fr)]">
-            <div>
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-[minmax(0,2fr)_repeat(3,minmax(0,1fr))]">
+            <div className="sm:col-span-2 lg:col-span-1">
               <p className="label">Search</p>
               <SearchInput value={search} onValueChange={setSearch} placeholder="Search facility, town or service" />
             </div>
@@ -152,8 +160,22 @@ export default function FacilitiesPage() {
               <Select
                 id="facility-province"
                 value={province}
-                onChange={(event) => setProvince(event.target.value)}
+                onChange={(event) => {
+                  setProvince(event.target.value);
+                  setDistrict('');
+                }}
                 options={[{ value: '', label: 'All provinces' }, ...PROVINCES.map((item) => ({ value: item, label: item }))]}
+              />
+            </div>
+            <div>
+              <label className="label" htmlFor="facility-district">
+                District
+              </label>
+              <Select
+                id="facility-district"
+                value={district}
+                onChange={(event) => setDistrict(event.target.value)}
+                options={[{ value: '', label: province ? `All in ${province}` : 'All districts' }, ...districtOptions.map((item) => ({ value: item, label: item }))]}
               />
             </div>
           </div>
@@ -179,7 +201,7 @@ export default function FacilitiesPage() {
             {loading ? 'Loading facilities…' : `${results.length} ${results.length === 1 ? 'facility' : 'facilities'}`}
             {origin ? ' · sorted by distance' : ''}
           </p>
-          {verifiedOnly || maternityOnly || emergencyOnly || type || province || term ? (
+          {verifiedOnly || maternityOnly || emergencyOnly || type || province || district || term ? (
             <Button
               variant="ghost"
               size="sm"
@@ -187,6 +209,7 @@ export default function FacilitiesPage() {
                 setSearch('');
                 setType('');
                 setProvince('');
+                setDistrict('');
                 setMaternityOnly(false);
                 setEmergencyOnly(false);
                 setVerifiedOnly(false);

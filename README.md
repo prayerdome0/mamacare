@@ -45,10 +45,13 @@ dashboard behind it.
 
 ### Public site (no account needed)
 
-Landing page, the full education library, individual articles, the facility directory
-with filters and directions, the verified provider directory, a standalone emergency
-page with Zambian short codes and the danger-sign checklist, plus About, How it works,
-FAQ, Contact, Privacy, Terms and a live Status page that reports what this deployment
+Landing page with a calm animated "vitals" band (a slow ECG trace; pure CSS transform
+work, no filters, and fully static when the visitor prefers reduced motion), the full
+education library, individual articles, the facility directory with name/district/province
+filters and directions — seeded with the researched Chama District (Muchinga Province)
+facilities first —, the verified provider directory, a standalone emergency page with
+Zambian short codes and the danger-sign checklist, plus About, How it works, FAQ,
+Contact, Privacy, Terms and a live Status page that reports what this deployment
 actually has configured.
 
 ### Mother app — `/app`
@@ -83,10 +86,23 @@ mother), appointments with completion notes, an education writer with a structur
 editor, messaging, caseload reports with CSV export, and their own professional profile
 with verification status and directory switches.
 
+Getting there is an application, not a switch: anyone with an account opens
+`/become-a-provider` and submits name, contact, location, facility, profession,
+licence/registration number, qualifications and optional supporting documents. That
+creates a `providers` record in `pending` state linked to the applicant's own user id —
+nothing else changes, and the record carries no privilege. An administrator approves or
+rejects from Admin → Nurse applications; approval flips the user's profile to the
+`PROVIDER` role (with `providerId`, `privilegeVersion` bump and a notification) and
+stamps the verified badge. Rejection sends the reason back to the applicant, who can
+correct the details and re-submit from the same page.
+
 ### Administration — `/admin`
 
-Dashboard with a triage list, accounts (role and status), provider verification queue,
-facility directory (including importing the built-in Zambia list), article review and
+Dashboard with live counts (accounts, providers to verify, **verified nurses**,
+facilities, open reports) and a triage list, accounts (role and status), the nurse
+application queue (view, approve, reject, manage — approving grants the provider role
+and the verified badge), the verified-nurses view, facility directory (including
+importing the built-in list and verifying contact details by phone), article review and
 publishing, announcements, broadcast notifications, appointment oversight, content
 reports, feedback, media and storage, the audit log, and platform settings.
 
@@ -102,7 +118,9 @@ npm run dev
 
 Open the printed URL. That is the whole setup: the Firebase and Cloudinary
 configuration for this project is committed as defaults in `web/src/config/env.ts`, so
-the app boots, seeds four demo accounts and runs entirely in the browser.
+the app boots connected to Firebase (Auth, Firestore, Storage). If the Firebase config
+is absent or `VITE_DATA_PROVIDER=local`, the same app runs in device mode — IndexedDB,
+local passwords and the seeded demo accounts — with no code changes.
 
 To run against your own Firebase project instead, copy `web/.env.example` to
 `web/.env.local` and fill in the values — then deploy the rules:
@@ -259,6 +277,7 @@ present and what changes when one is missing — never their values.
 /contact /privacy /terms /status                    *                      not found
 
 /sign-in /register /forgot-password /pending /home
+/become-a-provider      apply for nurse / provider verification (any signed-in account)
 
 /app                    home            /app/pregnancy      tracker
 /app/guide              weekly guide    /app/appointments   visits
@@ -350,6 +369,15 @@ so each rule says who it is for. What is covered:
   documents, notifications and devices excluded from every sharing path.
 - Self-service roles only at registration; `role`, `status` and `privilegeVersion` not
   writable by their own account.
+- Provider records can only be **born `pending`** — with no `verifiedBy`, `verifiedAt`
+  or `rejectionReason` — so an applicant cannot self-publish a "verified" status at
+  creation time (the one exception is a deployment whose global settings document has
+  explicitly turned approvals off, where registration may create an approved record,
+  still without a `verifiedBy` name). The device policy module enforces the identical
+  rule offline.
+- The only status change an applicant can make to their own provider record is a
+  **re-submission after a rejection** (`rejected` → `pending`, clearing the reason).
+  No client-side path reaches `approved`; only an administrator's write can.
 - Providers may write drafts but cannot publish or delete content.
 - Messages are immutable apart from read state, and cannot be deleted — report instead.
 - Audit log is append-only: create for the actor, read for administrators, never update.
@@ -385,9 +413,16 @@ keep the directory document to what a patient should see. It is a contained chan
   care, activity, rest, wellbeing, labour, postnatal, newborn, breastfeeding and
   immunization. They cannot be deleted; publishing your own version with the same slug
   replaces them everywhere.
-- **~40 Zambian facilities** (`config/facilities.ts`) with coordinates, maternal services
-  and opening hours, all arriving **unverified** — an administrator confirms each by phone
-  before it is trusted.
+- **~55 Zambian facilities** (`config/facilities.ts`), all arriving **unverified** — an
+  administrator confirms each by phone before it is trusted. The list opens with the
+  researched **Chama District, Muchinga Province** set: Chama District Hospital
+  (commissioned 2016, the district's main referral facility, with the public directory
+  phone number), Chama Rural Health Centre, Mundalanga Clinic, and the district's rural
+  health centres and health posts (Sitwe, Mwalala, Mwila, Nthonkho, Pondo, Tembwe,
+  Chibote, Chitondo, Kabanda, Kabila, Kanengo, Kala). Names, towns and provinces were
+  checked against the WHO Zambia health facility register, 2020 Lusaka Times coverage
+  and public map directories; phone numbers and exact coordinates were left empty
+  wherever nothing public and verifiable exists, rather than guessed.
 - **Routine ANC visit plan** — eight milestones at 12, 20, 26, 30, 34, 36, 38 and 40 weeks.
 
 Content is educational. It is not a substitute for a qualified professional, and every

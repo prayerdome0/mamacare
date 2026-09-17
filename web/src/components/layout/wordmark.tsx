@@ -14,14 +14,17 @@ export function Wordmark({
   className,
   compact = false,
   tone = 'dark',
+  beat = false,
 }: {
   className?: string;
   compact?: boolean;
   tone?: 'dark' | 'light';
+  /** Give the mark a soft heartbeat pulse (public header). Honors reduced motion. */
+  beat?: boolean;
 }) {
   return (
     <span className={cn('inline-flex items-center gap-2.5', className)}>
-      <Mark className={cn('size-9 shrink-0', tone === 'light' ? 'text-white' : 'text-brand-700')} />
+      <Mark className={cn('size-9 shrink-0', tone === 'light' ? 'text-white' : 'text-brand-700', beat && 'mark-beat')} />
       {!compact ? (
         <span className="flex flex-col leading-none">
           <span

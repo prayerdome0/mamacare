@@ -317,6 +317,9 @@ export default function Landing() {
             <ButtonLink to="/register?role=provider" variant="secondary">
               Register as a provider
             </ButtonLink>
+            <ButtonLink to="/become-a-provider" variant="secondary">
+              Already registered? Apply for verification
+            </ButtonLink>
             <ButtonLink to="/contact" variant="ghost">
               Talk to us about a partnership
             </ButtonLink>

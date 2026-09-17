@@ -276,10 +276,12 @@ export const facilitySchema = z.object({
     'pharmacy',
     'laboratory',
   ]),
+  district: trimmed(2, 80, 'District'),
   address: trimmed(3, 240, 'Address'),
   city: trimmed(2, 80, 'City or town'),
   province: trimmed(2, 80, 'Province'),
   country: z.string().min(2),
+  description: optionalText(600),
   phone: z.string().trim().optional().or(z.literal('')),
   emergencyPhone: z.string().trim().optional().or(z.literal('')),
   latitude: z.coerce.number().min(-90).max(90).optional(),
@@ -307,6 +309,30 @@ export const providerRegistrationSchema = z.object({
   phone: phoneField(false),
 });
 export type ProviderRegistrationValues = z.infer<typeof providerRegistrationSchema>;
+
+/**
+ * "Apply to become a nurse/provider" — the form a registered user fills in when
+ * they already have an account and want to join the clinical side. Everything
+ * here is reviewed by an administrator before any clinical privilege exists.
+ */
+export const nurseApplicationSchema = z
+  .object({
+    fullName: trimmed(2, 120, 'Full name'),
+    email: z.string().trim().toLowerCase().email('Enter a valid email address'),
+    phone: phoneField(false),
+    location: trimmed(2, 120, 'Town or district'),
+    facilityId: z.string().trim().optional().or(z.literal('')),
+    facilityName: trimmed(2, 140, 'Hospital or facility'),
+    profession: z.enum(['midwife', 'nurse', 'doctor', 'maternal-educator', 'community-health-worker', 'pharmacist']),
+    licenseNumber: trimmed(3, 60, 'Licence / registration number'),
+    qualifications: optionalText(1000),
+    consent: z.boolean(),
+  })
+  .refine((value) => value.consent === true, {
+    message: 'You must confirm the declaration before submitting',
+    path: ['consent'],
+  });
+export type NurseApplicationValues = z.infer<typeof nurseApplicationSchema>;
 
 /* ── Articles ────────────────────────────────────────────────────────── */
 

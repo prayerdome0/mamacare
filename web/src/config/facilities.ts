@@ -23,11 +23,15 @@ export const FACILITY_DATA_NOTE =
 interface FacilitySeed {
   name: string;
   type: Facility['type'];
+  /** Defaults to `city` when omitted (Zambian district hospitals sit in the district headquarters). */
+  district?: string;
   city: string;
   province: string;
   address: string;
-  lat: number;
-  lng: number;
+  lat: number | null;
+  lng: number | null;
+  phone?: string | null;
+  description?: string | null;
   services: string[];
   maternalServices: string[];
   openingHours: string;
@@ -36,6 +40,264 @@ interface FacilitySeed {
 }
 
 const LUSAKA = [-15.3875, 28.3228] as const;
+
+/**
+ * Chama District, Muchinga Province — the deployment's home district.
+ *
+ * Every entry below was checked against public sources before being added:
+ * the WHO Zambia health facility register (esurv.afro.who.int), the 2020 Lusaka
+ * Times coverage of the district hospital's 2016 commissioning, and public map
+ * directories. Names, towns and provinces are real; anything that could not be
+ * verified (phone numbers of the rural centres, exact coordinates) is left
+ * empty rather than guessed. All entries still arrive `verified: false` and
+ * only become "Verified" when an administrator confirms them by phone.
+ */
+const CHAMA_SEEDS: FacilitySeed[] = [
+  {
+    name: 'Chama District Hospital',
+    type: 'government-hospital',
+    district: 'Chama',
+    city: 'Chama',
+    province: 'Muchinga',
+    address: 'Chama, Muchinga Province',
+    lat: -11.2277156,
+    lng: 33.1745864,
+    phone: '+260 97 9256929',
+    description:
+      'The district hospital for Chama, commissioned in 2016. It is the main referral facility in the district, providing emergency, outpatient and maternal services, and the district health office is based nearby on Kambombo Road.',
+    services: ['Emergency', 'Outpatient', 'Maternity', 'Laboratory'],
+    maternalServices: ['Antenatal clinic', 'Delivery suite', 'Postnatal clinic', 'Family planning', 'Child welfare clinic', 'Immunization'],
+    openingHours: 'Open 24 hours, every day',
+    hasMaternity: true,
+    has24HourEmergency: true,
+  },
+  {
+    name: 'Chama Rural Health Centre',
+    type: 'clinic',
+    district: 'Chama',
+    city: 'Chama',
+    province: 'Muchinga',
+    address: 'Chama town, Muchinga Province',
+    lat: -11.2167,
+    lng: 33.1605,
+    description:
+      'Rural health centre serving the Chama town catchment. Coordinates are the town centre, approximate. Listed in the WHO Zambia health facility register.',
+    services: ['Outpatient', 'Maternal and child health', 'Immunization'],
+    maternalServices: ['Antenatal clinic', 'Child welfare clinic', 'Immunization', 'Family planning'],
+    openingHours: 'Not published — confirm before travelling',
+    hasMaternity: false,
+    has24HourEmergency: false,
+  },
+  {
+    name: 'Mundalanga Clinic',
+    type: 'clinic',
+    district: 'Chama',
+    city: 'Chama',
+    province: 'Muchinga',
+    address: 'Mundalanga, Chama, Muchinga Province',
+    lat: null,
+    lng: null,
+    description: 'Neighbourhood clinic in the Chama area, listed in public map directories. Confirm services by phone before travelling.',
+    services: ['Outpatient'],
+    maternalServices: [],
+    openingHours: 'Not published — confirm before travelling',
+    hasMaternity: false,
+    has24HourEmergency: false,
+  },
+  {
+    name: 'Sitwe Rural Health Centre',
+    type: 'clinic',
+    district: 'Chama',
+    city: 'Sitwe',
+    province: 'Muchinga',
+    address: 'Sitwe, Chama District, Muchinga Province',
+    lat: null,
+    lng: null,
+    description: 'Rural health centre in Sitwe, Chama District. Listed in the WHO Zambia health facility register.',
+    services: ['Outpatient', 'Maternal and child health'],
+    maternalServices: ['Antenatal clinic', 'Immunization', 'Family planning'],
+    openingHours: 'Not published — confirm before travelling',
+    hasMaternity: false,
+    has24HourEmergency: false,
+  },
+  {
+    name: 'Mwalala Rural Health Centre',
+    type: 'clinic',
+    district: 'Chama',
+    city: 'Mwalala',
+    province: 'Muchinga',
+    address: 'Mwalala, Chama District, Muchinga Province',
+    lat: -11.1743191,
+    lng: 32.904971,
+    description:
+      'Rural health centre in the Mwalala area of Chama District. Coordinates are approximate (public map listing). Listed in the WHO Zambia health facility register.',
+    services: ['Outpatient', 'Maternal and child health', 'Immunization'],
+    maternalServices: ['Antenatal clinic', 'Immunization', 'Family planning'],
+    openingHours: 'Not published — confirm before travelling',
+    hasMaternity: false,
+    has24HourEmergency: false,
+  },
+  {
+    name: 'Mwila Health Post',
+    type: 'health-post',
+    district: 'Chama',
+    city: 'Mwila',
+    province: 'Muchinga',
+    address: 'Mwila, Chama District, Muchinga Province',
+    lat: null,
+    lng: null,
+    description: 'Health post in the Mwila area of Chama District. Listed in the WHO Zambia health facility register.',
+    services: ['Primary care', 'Maternal and child health'],
+    maternalServices: ['Antenatal clinic', 'Immunization'],
+    openingHours: 'Not published — confirm before travelling',
+    hasMaternity: false,
+    has24HourEmergency: false,
+  },
+  {
+    name: 'Nthonkho Rural Health Centre',
+    type: 'clinic',
+    district: 'Chama',
+    city: 'Nthonkho',
+    province: 'Muchinga',
+    address: 'Nthonkho, Chama District, Muchinga Province',
+    lat: null,
+    lng: null,
+    description: 'Rural health centre in the Nthonkho area of Chama District. Listed in the WHO Zambia health facility register.',
+    services: ['Outpatient', 'Maternal and child health'],
+    maternalServices: ['Antenatal clinic', 'Immunization', 'Family planning'],
+    openingHours: 'Not published — confirm before travelling',
+    hasMaternity: false,
+    has24HourEmergency: false,
+  },
+  {
+    name: 'Pondo Rural Health Centre',
+    type: 'clinic',
+    district: 'Chama',
+    city: 'Pondo',
+    province: 'Muchinga',
+    address: 'Pondo, Chama District, Muchinga Province',
+    lat: null,
+    lng: null,
+    description: 'Rural health centre in the Pondo area of Chama District. Listed in the WHO Zambia health facility register.',
+    services: ['Outpatient', 'Maternal and child health'],
+    maternalServices: ['Antenatal clinic', 'Immunization'],
+    openingHours: 'Not published — confirm before travelling',
+    hasMaternity: false,
+    has24HourEmergency: false,
+  },
+  {
+    name: 'Tembwe Rural Health Centre',
+    type: 'clinic',
+    district: 'Chama',
+    city: 'Tembwe',
+    province: 'Muchinga',
+    address: 'Tembwe, Chama District, Muchinga Province',
+    lat: null,
+    lng: null,
+    description: 'Rural health centre in the Tembwe area of Chama District. Listed in the WHO Zambia health facility register.',
+    services: ['Outpatient', 'Maternal and child health'],
+    maternalServices: ['Antenatal clinic', 'Immunization'],
+    openingHours: 'Not published — confirm before travelling',
+    hasMaternity: false,
+    has24HourEmergency: false,
+  },
+  {
+    name: 'Chibote Rural Health Centre',
+    type: 'clinic',
+    district: 'Chama',
+    city: 'Chibote',
+    province: 'Muchinga',
+    address: 'Chibote, Chama District, Muchinga Province',
+    lat: null,
+    lng: null,
+    description: 'Rural health centre in the Chibote area of Chama District. Listed in the WHO Zambia health facility register.',
+    services: ['Outpatient', 'Maternal and child health'],
+    maternalServices: ['Antenatal clinic', 'Immunization'],
+    openingHours: 'Not published — confirm before travelling',
+    hasMaternity: false,
+    has24HourEmergency: false,
+  },
+  {
+    name: 'Chitondo Rural Health Centre',
+    type: 'clinic',
+    district: 'Chama',
+    city: 'Chitondo',
+    province: 'Muchinga',
+    address: 'Chitondo, Chama District, Muchinga Province',
+    lat: null,
+    lng: null,
+    description: 'Rural health centre in the Chitondo area of Chama District. Listed in the WHO Zambia health facility register.',
+    services: ['Outpatient', 'Maternal and child health'],
+    maternalServices: ['Antenatal clinic', 'Immunization'],
+    openingHours: 'Not published — confirm before travelling',
+    hasMaternity: false,
+    has24HourEmergency: false,
+  },
+  {
+    name: 'Kabanda Rural Health Centre',
+    type: 'clinic',
+    district: 'Chama',
+    city: 'Kabanda',
+    province: 'Muchinga',
+    address: 'Kabanda, Chama District, Muchinga Province',
+    lat: null,
+    lng: null,
+    description: 'Rural health centre in the Kabanda area of Chama District, near the DRC border. Listed in the WHO Zambia health facility register.',
+    services: ['Outpatient', 'Maternal and child health'],
+    maternalServices: ['Antenatal clinic', 'Immunization'],
+    openingHours: 'Not published — confirm before travelling',
+    hasMaternity: false,
+    has24HourEmergency: false,
+  },
+  {
+    name: 'Kabila Rural Health Centre',
+    type: 'clinic',
+    district: 'Chama',
+    city: 'Kabila',
+    province: 'Muchinga',
+    address: 'Kabila, Chama District, Muchinga Province',
+    lat: null,
+    lng: null,
+    description: 'Rural health centre in the Kabila area of Chama District. Listed in the WHO Zambia health facility register.',
+    services: ['Outpatient', 'Maternal and child health'],
+    maternalServices: ['Antenatal clinic', 'Immunization'],
+    openingHours: 'Not published — confirm before travelling',
+    hasMaternity: false,
+    has24HourEmergency: false,
+  },
+  {
+    name: 'Kanengo Rural Health Centre',
+    type: 'clinic',
+    district: 'Chama',
+    city: 'Kanengo',
+    province: 'Muchinga',
+    address: 'Kanengo, Chama District, Muchinga Province',
+    lat: null,
+    lng: null,
+    description: 'Rural health centre in the Kanengo area of Chama District. Listed in the WHO Zambia health facility register.',
+    services: ['Outpatient', 'Maternal and child health'],
+    maternalServices: ['Antenatal clinic', 'Immunization'],
+    openingHours: 'Not published — confirm before travelling',
+    hasMaternity: false,
+    has24HourEmergency: false,
+  },
+  {
+    name: 'Kala Refugee Rural Health Centre',
+    type: 'clinic',
+    district: 'Chama',
+    city: 'Kala',
+    province: 'Muchinga',
+    address: 'Kala, Chama District, Muchinga Province',
+    lat: null,
+    lng: null,
+    description: 'Health centre serving the Kala settlement in Chama District. Listed in the WHO Zambia health facility register.',
+    services: ['Outpatient', 'Maternal and child health'],
+    maternalServices: ['Antenatal clinic', 'Immunization'],
+    openingHours: 'Not published — confirm before travelling',
+    hasMaternity: false,
+    has24HourEmergency: false,
+  },
+];
 
 const SEEDS: FacilitySeed[] = [
   {
@@ -629,15 +891,19 @@ export const PROVINCE_CENTRES: Record<string, [number, number]> = {
 
 export function facilitySeeds(country = 'ZM'): Facility[] {
   const nowIso = new Date().toISOString();
-  return SEEDS.map((seed) => ({
+  // Chama District entries first: they are this deployment's home district, and
+  // the rest of the country follows so the directory stays nationally useful.
+  return [...CHAMA_SEEDS, ...SEEDS].map((seed) => ({
     id: `facility-${seed.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}`,
     name: seed.name,
     type: seed.type,
+    district: seed.district ?? seed.city,
     address: seed.address,
     city: seed.city,
     province: seed.province,
     country,
-    phone: null,
+    description: seed.description ?? null,
+    phone: seed.phone ?? null,
     emergencyPhone: null,
     latitude: seed.lat,
     longitude: seed.lng,

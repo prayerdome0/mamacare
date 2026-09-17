@@ -103,17 +103,27 @@ export class SessionStore {
     if (!force && this.contextLoadedFor === actor.uid) return;
     this.contextLoadedFor = actor.uid;
 
+    // The approvals switch lives in the global settings document; defaulting to
+    // true means a missing read can never relax the verification gate.
+    let approvalsRequired = true;
+    try {
+      const settings = await this.data.get('settings', 'global');
+      approvalsRequired = settings?.providerApprovalsRequired !== false;
+    } catch {
+      approvalsRequired = true;
+    }
+
     if (actor.role === 'PROVIDER' || actor.role === 'FACILITY_ADMIN') {
       try {
         const links = await this.data.rows('care_links', {
           where: [{ field: 'providerUserId', op: '==', value: actor.uid }],
         });
         const ids = links.filter((link) => link.status === 'active').map((link) => link.motherUserId);
-        setPolicyContext({ linkedPatientIds: ids });
+        setPolicyContext({ linkedPatientIds: ids, providerApprovalsRequired: approvalsRequired });
         this.state = { ...this.state, linkedPatientIds: ids };
       } catch (error) {
         logProviderError('care links', error);
-        setPolicyContext({ linkedPatientIds: [] });
+        setPolicyContext({ linkedPatientIds: [], providerApprovalsRequired: approvalsRequired });
         this.state = { ...this.state, linkedPatientIds: [] };
       }
       return;
@@ -134,7 +144,7 @@ export class SessionStore {
           }),
           { appointments: false, reminders: false, education: false, milestones: false },
         );
-        setPolicyContext({ supporterPermissions: permissions, linkedPatientIds: [] });
+        setPolicyContext({ supporterPermissions: permissions, linkedPatientIds: [], providerApprovalsRequired: approvalsRequired });
         this.state = { ...this.state, supporterAccess: permissions, linkedPatientIds: [] };
       } catch (error) {
         logProviderError('supporter links', error);
@@ -143,6 +153,7 @@ export class SessionStore {
     }
 
     clearPolicyContext();
+    setPolicyContext({ linkedPatientIds: [], providerApprovalsRequired: approvalsRequired });
     this.state = { ...this.state, linkedPatientIds: [], supporterAccess: null };
   }
 
