@@ -160,8 +160,14 @@ export const truncate = (value: string, max = 90): string =>
 export const telHref = (value: string): string => `tel:${value.replace(/[^\d+]/g, '')}`;
 
 /** mailto: with an optional subject. */
-export const mailtoHref = (email: string, subject?: string): string =>
-  `mailto:${email}${subject ? `?subject=${encodeURIComponent(subject)}` : ''}`;
+/** Builds a `mailto:` link, optionally pre-filling the subject and body. */
+export const mailtoHref = (email: string, subject?: string, body?: string): string => {
+  const params = new URLSearchParams();
+  if (subject) params.set('subject', subject);
+  if (body) params.set('body', body);
+  const query = params.toString();
+  return `mailto:${email}${query ? `?${query}` : ''}`;
+};
 
 export function maskPhone(phone?: string | null): string {
   if (!phone) return '—';

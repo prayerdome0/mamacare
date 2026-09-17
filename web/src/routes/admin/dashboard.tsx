@@ -1,341 +1,394 @@
-import { useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+/**
+ * Administrator dashboard.
+ *
+ * One screen that answers "what needs me today": providers waiting on
+ * verification, content reports waiting on a decision, feedback nobody has
+ * answered, and whether the deployment itself is healthy. Counts are read live at
+ * load — there is no aggregation job, so a small deployment stays fast and a large
+ * one still shows the truth rather than a stale cache.
+ */
+
+import { useEffect, useMemo, useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
 import {
   Activity,
   AlertTriangle,
-  Boxes,
-  Check,
-  KeyRound,
-  RefreshCw,
-  Settings2,
-  ShieldAlert,
-  UserPlus,
+  Newspaper as ArticleIcon,
+  Building2,
+  CalendarDays,
+  CheckCircle2,
+  ClipboardList,
+  Database,
+  MessageSquareWarning,
+  ShieldCheck,
+  Stethoscope,
   Users,
-  X,
 } from 'lucide-react';
-import { AppShell } from '@/components/layout/shell';
-import { Card, KeyValue, StatCard } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Badge, EmptyState, ErrorState, LoadingRows, NoticeState } from '@/components/ui/display';
-import { DataTable, type Column } from '@/components/ui/table';
-import { Field, Select } from '@/components/ui/form';
-import { useAsync } from '@/hooks';
-import { useToast } from '@/components/ui/toast';
+import { useAsync, useLiveQuery } from '@/hooks';
+import {
+  announcementRepo,
+  articleRepo,
+  facilityRepo,
+  feedbackRepo,
+  profileRepo,
+  providerRepo,
+  reportRepo,
+  settingsRepo,
+} from '@/services/repositories';
+import { diagnostics } from '@/services/session-store';
 import { useSession } from '@/providers/app-providers';
-import { services } from '@/services/session-store';
-import { computeStats } from '@/services/dashboard/dashboard-service';
-import { approvePendingUser, listUsers } from '@/services/admin/user-admin';
-import { integrations } from '@/config/env';
-import { SetupChecklist } from '@/components/layout/setup-checklist';
+import { integrations, dataProvider } from '@/config/env';
 import { formatDate, relativeTime } from '@/lib/utils';
-import { BarChart, DonutChart } from '@/components/charts';
-import { ROLE_LABELS, type Facility, type Role } from '@/types/domain';
-import type { UserDirectoryRow } from '@/services/admin/user-admin';
+import { ACCOUNT_STATUS_LABELS, ROLE_LABELS, type Article, type HealthcareProvider, type UserProfile } from '@/types/domain';
+import { StaffPageHeader, StaffShell } from '@/components/layout/staff-shell';
+import { Button } from '@/components/ui/button';
+import { Card, SectionHeading, StatCard } from '@/components/ui/card';
+import { Badge, EmptyState, LoadingRows } from '@/components/ui/display';
+import { Timeline } from '@/components/ui/tabs';
 
-/**
- * Administrator overview: platform totals from the same aggregation the facility
- * dashboards use, the approval queue that only an admin can clear, and the live
- * state of every optional integration.
- */
 export default function AdminDashboard() {
-  const { refresh } = useSession();
-  const toast = useToast();
-  const stats = useAsync(() => computeStats({ facilityId: null, months: 6 }), {});
-  const pending = useAsync(() => listUsers({ status: 'PENDING_APPROVAL' }), {});
-  const facilities = useAsync(() => services().data.allFacilities(), {});
-  const audit = useAsync(() => services().data.list('audit_logs', { orderBy: { field: 'createdAt', direction: 'desc' }, limit: 6 }), {});
-  const roster = useAsync(() => services().data.motherRoster(null), {});
+  const { actor } = useSession();
+  const navigate = useNavigate();
 
-  const [decisions, setDecisions] = useState<Record<string, { role: Role; facilityId: string }>>({});
-  const [busyId, setBusyId] = useState<string | null>(null);
+  const { data: users, loading: usersLoading } = useAsync(() => profileRepo.list(1000), { immediate: true });
+  const { data: providers } = useAsync(() => providerRepo.all(), { immediate: true });
+  const { data: facilities } = useAsync(() => facilityRepo.list(), { immediate: true });
+  const { data: articles } = useAsync(() => articleRepo.library({ includeDrafts: true }), { immediate: true });
+  const { data: reports } = useAsync(() => reportRepo.all(), { immediate: true });
+  const { data: feedback } = useAsync(() => feedbackRepo.all(), { immediate: true });
+  const { data: announcements } = useAsync(() => announcementRepo.all(), { immediate: true });
+  const { data: settings } = useAsync(() => settingsRepo.get(), { immediate: true });
+  const { rows: appointments } = useLiveQuery('appointments', { limit: 500 });
+  const [system, setSystem] = useState<Awaited<ReturnType<typeof diagnostics>> | null>(null);
 
-  const reload = () => {
-    void stats.run();
-    void pending.run();
-    void facilities.run();
-    void audit.run();
-    void roster.run();
-  };
+  useEffect(() => {
+    document.title = 'Admin dashboard · Mama Care';
+    let cancelled = false;
+    const refresh = async (): Promise<void> => {
+      const next = await diagnostics();
+      if (!cancelled) setSystem(next);
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 20_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
 
-  const mothersByFacility = useMemo(() => {
-    const map = new Map<string, number>();
-    for (const mother of roster.data ?? []) {
-      const key = mother.careFacilityId || mother.registrationFacilityId;
-      map.set(key, (map.get(key) ?? 0) + 1);
-    }
-    return map;
-  }, [roster.data]);
+  const userList = useMemo<UserProfile[]>(() => users?.rows ?? [], [users]);
+  const providerList = useMemo<HealthcareProvider[]>(() => providers ?? [], [providers]);
+  const articleList = useMemo<Article[]>(() => articles ?? [], [articles]);
 
-  const approve = async (row: UserDirectoryRow, action: 'approve' | 'decline') => {
-    const choice = decisions[row.id] ?? { role: (row.requestedRole ?? 'COMMUNITY_HEALTH_WORKER') as Role, facilityId: '' };
-    setBusyId(row.id);
-    try {
-      if (action === 'approve') {
-        if (!choice.facilityId) throw new Error('Choose the facility this account belongs to before approving it.');
-        await approvePendingUser(row.id, choice.role, choice.facilityId, 'Approved from the administrator overview.');
-        toast.success('Account approved', `${row.fullName} is now ${ROLE_LABELS[choice.role]}. Claims were issued, so they apply on their next token refresh.`);
-      } else {
-        await services().data.update('users', row.id, { status: 'SUSPENDED', deactivationReason: 'Registration declined by an administrator.' } as never);
-        toast.info('Registration declined', `${row.fullName} was suspended and told to contact their facility.`);
-      }
-      void pending.run();
-      void refresh();
-    } catch (error) {
-      toast.error(error, 'Could not process the request');
-    } finally {
-      setBusyId(null);
-    }
-  };
+  const stats = useMemo(() => {
+    const byRole = userList.reduce<Record<string, number>>((counts, user) => {
+      counts[user.role] = (counts[user.role] ?? 0) + 1;
+      return counts;
+    }, {});
+    const pendingProviders = providerList.filter((provider) => provider.status === 'pending');
+    const rejectedProviders = providerList.filter((provider) => provider.status === 'rejected');
+    const suspendedUsers = userList.filter((user) => user.status === 'SUSPENDED');
+    const drafts = articleList.filter((article) => article.status === 'draft');
+    const stale = articleList.filter((article) => {
+      const days = settings?.contentReviewReminderDays ?? 365;
+      const reviewed = article.reviewedAt ?? article.updatedAt;
+      if (!reviewed) return false;
+      return article.status === 'published' && (Date.now() - new Date(reviewed).getTime()) / 86_400_000 > days;
+    });
+    const openReports = (reports ?? []).filter((report) => report.status === 'open');
+    const newFeedback = (feedback ?? []).filter((item) => item.status === 'new');
+    const today = new Date().toISOString().slice(0, 10);
+    const todayAppointments = appointments.filter((appointment) => appointment.date === today);
+    const unverifiedFacilities = (facilities ?? []).filter((facility) => !facility.verified);
+    return {
+      users: userList.length,
+      byRole,
+      mothers: byRole.MOTHER ?? 0,
+      pendingProviders: pendingProviders.length,
+      rejectedProviders: rejectedProviders.length,
+      suspendedUsers: suspendedUsers.length,
+      drafts: drafts.length,
+      stale: stale.length,
+      openReports: openReports.length,
+      newFeedback: newFeedback.length,
+      todayAppointments: todayAppointments.length,
+      facilities: (facilities ?? []).length,
+      unverifiedFacilities: unverifiedFacilities.length,
+      activeAnnouncements: (announcements ?? []).filter((item) => item.active).length,
+      recentRegistrations: userList.slice(0, 6),
+    };
+  }, [userList, providerList, articleList, reports, feedback, announcements, facilities, appointments, settings]);
 
-  const pendingRows = pending.data?.rows ?? [];
+  const attention = useMemo(
+    () =>
+      [
+        {
+          key: 'providers',
+          label: `${stats.pendingProviders} provider${stats.pendingProviders === 1 ? '' : 's'} awaiting verification`,
+          detail: 'Check the licence number and facility before approving. Mothers see verified providers first.',
+          tone: 'amber' as const,
+          to: '/admin/providers',
+          show: stats.pendingProviders > 0,
+        },
+        {
+          key: 'reports',
+          label: `${stats.openReports} content report${stats.openReports === 1 ? '' : 's'} open`,
+          detail: 'Somebody flagged an article, facility or message as wrong or unsafe. Decide and record why.',
+          tone: 'red' as const,
+          to: '/admin/reports',
+          show: stats.openReports > 0,
+        },
+        {
+          key: 'feedback',
+          label: `${stats.newFeedback} feedback message${stats.newFeedback === 1 ? '' : 's'} unanswered`,
+          detail: 'Most feedback is about facility data being out of date — that is the fastest trust win available.',
+          tone: 'amber' as const,
+          to: '/admin/feedback',
+          show: stats.newFeedback > 0,
+        },
+        {
+          key: 'content',
+          label: `${stats.stale} published article${stats.stale === 1 ? '' : 's'} past the review window`,
+          detail: `Guidance older than ${settings?.contentReviewReminderDays ?? 365} days should be re-checked against current national guidance.`,
+          tone: 'amber' as const,
+          to: '/admin/articles',
+          show: stats.stale > 0,
+        },
+        {
+          key: 'drafts',
+          label: `${stats.drafts} draft${stats.drafts === 1 ? '' : 's'} waiting to be published`,
+          detail: 'Providers write, administrators publish. Every draft is a clinician waiting on you.',
+          tone: 'brand' as const,
+          to: '/admin/articles',
+          show: stats.drafts > 0,
+        },
+        {
+          key: 'facilities',
+          label: `${stats.unverifiedFacilities} facilit${stats.unverifiedFacilities === 1 ? 'y' : 'ies'} not verified`,
+          detail: 'Unverified facilities are shown with a caution badge in the directory.',
+          tone: 'amber' as const,
+          to: '/admin/facilities',
+          show: stats.unverifiedFacilities > 0,
+        },
+        {
+          key: 'suspended',
+          label: `${stats.suspendedUsers} suspended account${stats.suspendedUsers === 1 ? '' : 's'}`,
+          detail: 'Suspended accounts keep their records but cannot sign in. Review them periodically.',
+          tone: 'neutral' as const,
+          to: '/admin/users',
+          show: stats.suspendedUsers > 0,
+        },
+      ].filter((item) => item.show),
+    [stats, settings],
+  );
 
-  const facilityColumns: Column<Facility>[] = [
-    {
-      key: 'facility',
-      header: 'Facility',
-      render: (row) => (
-        <div>
-          <p className="text-[0.88rem] font-semibold text-ink-900">{row.name}</p>
-          <p className="caption mt-0.5">
-            {row.code} · {row.district}, {row.province}
-          </p>
-        </div>
-      ),
-      sortValue: (row) => row.name,
-    },
-    { key: 'type', header: 'Capacity', render: (row) => (
-      <div className="flex flex-wrap gap-1">
-        <Badge tone={row.hasMaternityWard ? 'brand' : 'neutral'}>maternity</Badge>
-        <Badge tone={row.hasUltrasound ? 'brand' : 'neutral'}>ultrasound</Badge>
-        <Badge tone={row.hasLaboratory ? 'brand' : 'neutral'}>lab</Badge>
-      </div>
-    ), hideBelow: 'sm' },
-    { key: 'mothers', header: 'Mothers', render: (row) => <span className="tnum text-[0.9rem] font-semibold">{mothersByFacility.get(row.id) ?? 0}</span>, sortValue: (row) => mothersByFacility.get(row.id) ?? 0 },
-    {
-      key: 'active',
-      header: 'Status',
-      render: (row) => <Badge tone={row.active ? 'green' : 'amber'}>{row.active ? 'Active' : 'Inactive'}</Badge>,
-      hideBelow: 'md',
-    },
-    {
-      key: 'open',
-      header: '',
-      align: 'right',
-      render: (row) => (
-        <Link to={`/admin/facilities?focus=${row.id}`} className="text-[0.78rem] font-semibold text-brand-800 hover:underline">
-          Configure
-        </Link>
-      ),
-    },
-  ];
+  if (usersLoading) {
+    return (
+      <StaffShell portal="Admin Dashboard">
+        <StaffPageHeader title="Dashboard" />
+        <LoadingRows rows={6} />
+      </StaffShell>
+    );
+  }
 
   return (
-    <AppShell
-      title="Administration"
-      subtitle={`${stats.data?.totals.facilities ?? 0} facilities · ${stats.data?.scope.facilityName ?? 'platform-wide'} · updated ${stats.data ? relativeTime(new Date().toISOString()) : '—'}`}
-      actions={
-        <>
-          <Button size="sm" variant="secondary" loading={stats.loading} onClick={reload} icon={<RefreshCw className="size-4" aria-hidden />}>
-            Refresh
-          </Button>
-          <Link to="/admin/users" className="btn btn-sm inline-flex items-center gap-1.5 btn-primary">
-            <Users className="size-4" aria-hidden /> User directory
-          </Link>
-        </>
-      }
-    >
-      {stats.error ? <div className="mb-4"><ErrorState message={stats.error} onRetry={reload} /></div> : null}
+    <StaffShell portal="Admin Dashboard">
+      <StaffPageHeader
+        title={`Dashboard · ${actor?.displayName ?? 'Administrator'}`}
+        description={`${stats.users} accounts · ${stats.facilities} facilities · ${articleList.filter((article) => article.status === 'published').length} published articles · data on ${dataProvider}`}
+        actions={
+          <>
+            <Button variant="secondary" size="sm" onClick={() => navigate('/admin/audit')} icon={<ShieldCheck className="size-4" aria-hidden />}>
+              Audit log
+            </Button>
+            <Button variant="primary" size="sm" onClick={() => navigate('/admin/settings')} icon={<Database className="size-4" aria-hidden />}>
+              Settings
+            </Button>
+          </>
+        }
+      />
 
-      <SetupChecklist className="mb-4" />
+      {settings?.maintenanceMessage ? (
+        <Card className="card-pad mb-4 border-[var(--color-risk-amber-border)] bg-[var(--color-risk-amber-soft)]">
+          <div className="flex flex-wrap items-center gap-3">
+            <Badge tone="amber">Maintenance notice live</Badge>
+            <p className="text-sm text-ink-700">{settings.maintenanceMessage}</p>
+            <Link to="/admin/settings" className="btn btn-secondary btn-sm ml-auto">Edit</Link>
+          </div>
+        </Card>
+      ) : null}
 
-      <div className="mb-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <StatCard label="Mothers in care" value={stats.data?.totals.mothers ?? '—'} hint="Active records across all facilities" loading={stats.loading} icon={<Users className="size-4" aria-hidden />} onClick={() => undefined} />
-        <StatCard label="Awaiting approval" value={pendingRows.length} hint={pendingRows.length ? 'Accounts cannot access records until approved' : 'Nobody waiting'} tone={pendingRows.length ? 'amber' : 'green'} loading={pending.loading} />
-        <StatCard label="Unresolved alerts" value={stats.data?.totals.openAlerts ?? '—'} hint={`${stats.data?.totals.redAlerts ?? 0} red`} tone={(stats.data?.totals.redAlerts ?? 0) > 0 ? 'red' : 'default'} loading={stats.loading} icon={<AlertTriangle className="size-4" aria-hidden />} />
-        <StatCard label="Missed appointments (period)" value={stats.data?.totals.missedAppointments ?? '—'} hint="Counts from appointment rows" tone="default" loading={stats.loading} />
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <StatCard label="Accounts" value={stats.users} icon={<Users className="size-4" aria-hidden />} hint={`${stats.mothers} mothers`} onClick={() => navigate('/admin/users')} />
+        <StatCard
+          label="Providers to verify"
+          value={stats.pendingProviders}
+          icon={<Stethoscope className="size-4" aria-hidden />}
+          tone={stats.pendingProviders > 0 ? 'amber' : 'green'}
+          onClick={() => navigate('/admin/providers')}
+        />
+        <StatCard
+          label="Open reports"
+          value={stats.openReports}
+          icon={<MessageSquareWarning className="size-4" aria-hidden />}
+          tone={stats.openReports > 0 ? 'red' : 'green'}
+          onClick={() => navigate('/admin/reports')}
+        />
+        <StatCard
+          label="New feedback"
+          value={stats.newFeedback}
+          icon={<ClipboardList className="size-4" aria-hidden />}
+          tone={stats.newFeedback > 0 ? 'amber' : 'default'}
+          onClick={() => navigate('/admin/feedback')}
+        />
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-[1.4fr_1fr]">
+      <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <StatCard label="Facilities" value={stats.facilities} icon={<Building2 className="size-4" aria-hidden />} hint={`${stats.unverifiedFacilities} unverified`} onClick={() => navigate('/admin/facilities')} />
+        <StatCard label="Articles & drafts" value={articleList.length} icon={<ArticleIcon className="size-4" aria-hidden />} hint={`${stats.drafts} drafts`} onClick={() => navigate('/admin/articles')} />
+        <StatCard label="Appointments today" value={stats.todayAppointments} icon={<CalendarDays className="size-4" aria-hidden />} onClick={() => navigate('/admin/appointments')} />
+        <StatCard label="Live announcements" value={stats.activeAnnouncements} icon={<Activity className="size-4" aria-hidden />} onClick={() => navigate('/admin/announcements')} />
+      </div>
+
+      <div className="mt-6 grid gap-4 lg:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)]">
         <div className="space-y-4">
-          <Card
-            title="Access requests"
-            description="Self-registered health workers stay locked out until an administrator assigns a role and a facility. Nothing here grants a role to the signed-in account."
-            actions={<Link to="/admin/users" className="text-[0.78rem] font-semibold text-brand-800 hover:underline">Open directory</Link>}
-            bodyClassName="p-0"
-          >
-            {pending.loading && pendingRows.length === 0 ? (
-              <div className="p-4">
-                <LoadingRows rows={2} />
-              </div>
-            ) : pendingRows.length === 0 ? (
-              <EmptyState icon={<Check className="size-5" aria-hidden />} title="No access requests waiting" description="When a health worker registers with a facility email they appear here for approval." />
+          <Card className="card-pad">
+            <SectionHeading eyebrow="Triage" title="Needs your decision" description="Only what is actually waiting. When this list is empty, the platform is being looked after." />
+            {attention.length === 0 ? (
+              <p className="mt-3 flex items-center gap-2 text-sm text-ink-700">
+                <CheckCircle2 className="size-4 text-[var(--color-risk-green)]" aria-hidden />
+                Nothing is waiting on you. Providers are verified, reports are resolved and content is inside its review window.
+              </p>
             ) : (
-              <ul className="divide-y divide-ink-100">
-                {pendingRows.map((row) => {
-                  const choice = decisions[row.id] ?? { role: (row.requestedRole ?? 'COMMUNITY_HEALTH_WORKER') as Role, facilityId: firstFacilityId(facilities.data ?? undefined) };
-                  return (
-                    <li key={row.id} className="flex flex-wrap items-start justify-between gap-3 p-3.5">
-                      <div className="min-w-0">
-                        <p className="text-[0.88rem] font-semibold text-ink-900">{row.fullName}</p>
-                        <p className="caption mt-0.5 break-all">
-                          {row.email} · requested {row.requestedRole ? ROLE_LABELS[row.requestedRole] : 'a clinical role'} · registered {formatDate(row.createdAt)}
-                        </p>
-                      </div>
-                      <div className="flex flex-wrap items-end gap-2">
-                        <Field label="Grant role">
-                          <Select
-                            value={choice.role}
-                            options={(['FACILITY_SUPERVISOR', 'MIDWIFE', 'NURSE', 'COMMUNITY_HEALTH_WORKER'] as Role[]).map((role) => ({ value: role, label: ROLE_LABELS[role] }))}
-                            onValueChange={(value) => setDecisions({ ...decisions, [row.id]: { ...choice, role: value as Role } })}
-                            className="w-48"
-                            placeholder={null}
-                          />
-                        </Field>
-                        <Field label="Facility">
-                          <Select
-                            value={choice.facilityId}
-                            options={(facilities.data ?? []).map((facility) => ({ value: facility.id, label: facility.name }))}
-                            onValueChange={(value) => setDecisions({ ...decisions, [row.id]: { ...choice, facilityId: value } })}
-                            className="w-48"
-                            placeholder="Select a facility"
-                          />
-                        </Field>
-                        <Button size="sm" loading={busyId === row.id} onClick={() => void approve(row, 'approve')}>
-                          Approve
-                        </Button>
-                        <Button size="sm" variant="ghost" disabled={busyId === row.id} onClick={() => void approve(row, 'decline')} icon={<X className="size-4" aria-hidden />}>
-                          Decline
-                        </Button>
-                      </div>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-          </Card>
-
-          <Card title="Facilities" description="Capacity and enrolment per facility. Everything else in the platform scopes to these rows." bodyClassName="p-0" actions={<Link to="/admin/facilities" className="text-[0.78rem] font-semibold text-brand-800 hover:underline">Manage</Link>}>
-            {facilities.loading && (facilities.data ?? []).length === 0 ? (
-              <div className="p-4">
-                <LoadingRows rows={3} />
-              </div>
-            ) : (facilities.data ?? []).length === 0 ? (
-              <EmptyState
-                title="No facilities configured"
-                description="Add the hospitals and clinics this deployment serves. Midwives and CHWs are then assigned to them, and every list, alert and report is scoped by facility."
-                action={
-                  <Link to="/admin/facilities" className="btn btn-primary btn-sm">
-                    Add the first facility
-                  </Link>
-                }
-              />
-            ) : (
-              <DataTable rows={facilities.data ?? []} columns={facilityColumns} rowKey={(row) => row.id} dense pageSize={10} caption="Facilities" />
-            )}
-          </Card>
-        </div>
-
-        <div className="space-y-4">
-          <Card title="Platform activity" description={`Visits recorded per month over ${stats.data ? 'six' : '—'} months`}>
-            {stats.loading && !stats.data ? (
-              <LoadingRows rows={3} />
-            ) : stats.data ? (
-              <div className="space-y-4">
-                <BarChart data={stats.data.visitsByMonth.map((point) => ({ label: point.label, value: point.value }))} height={150} />
-                <DonutChart
-                  size={132}
-                  data={stats.data.riskMix.map((row) => ({
-                    label: row.level,
-                    value: row.count,
-                    color: row.level === 'RED' ? '#c0392f' : row.level === 'AMBER' ? '#b4761c' : '#1f8f66',
-                  }))}
-                  centerLabel="Risk mix"
-                  centerValue={stats.data.totals.activePregnancies}
-                />
-                <KeyValue
-                  columns={2}
-                  dense
-                  items={[
-                    { label: 'Attendance rate', value: `${stats.data.attendance.ratePct}%`, tone: 'strong' },
-                    { label: 'Deliveries this month', value: stats.data.totals.deliveriesThisMonth },
-                    { label: 'Health workers', value: stats.data.totals.healthWorkers },
-                    { label: 'Reports generated', value: stats.data.totals.reportsGenerated },
-                  ]}
-                />
-              </div>
-            ) : null}
-          </Card>
-
-          <Card title="Integrations" description="Configuration only — no secret values are read by the browser.">
-            <ul className="space-y-2.5">
-              <IntegrationRow label="Data provider" ok={integrations.provider === 'firebase'} detail={integrations.provider === 'firebase' ? 'Cloud Firestore with security rules' : 'Device storage (IndexedDB) on this browser'} />
-              <IntegrationRow label="Firebase project" ok={integrations.firebase.configured} detail={integrations.firebase.projectId ?? 'VITE_FIREBASE_* not set'} />
-              <IntegrationRow label="Cloudinary media" ok={integrations.cloudinary.configured} detail={integrations.cloudinary.cloudName ?? 'VITE_CLOUDINARY_CLOUD_NAME not set'} />
-              <IntegrationRow label="Push messaging" ok={integrations.push.configured} detail={integrations.push.configured ? 'VAPID key present' : 'VITE_FIREBASE_VAPID_KEY not set'} />
-              <IntegrationRow label="Signed uploads API" ok={integrations.provider !== 'local'} detail="The Cloudinary API secret lives only on the server" />
-            </ul>
-          </Card>
-
-          <Card title="Last platform activity" description="Audit entries are append-only; opening the log shows the full history." actions={<Link to="/admin/audit" className="text-[0.78rem] font-semibold text-brand-800 hover:underline">Full log</Link>} bodyClassName="p-0">
-            {(audit.data?.rows ?? []).length === 0 ? (
-              <div className="p-4">
-                <EmptyState icon={<Activity className="size-5" aria-hidden />} title="No audit entries yet" description="Sign-ins, record writes, privilege changes and document access all land here." />
-              </div>
-            ) : (
-              <ul className="divide-y divide-ink-100">
-                {(audit.data?.rows ?? []).map((entry: { id: string; action: string; actorName: string; targetLabel?: string | null; targetType: string; createdAt: string }) => (
-                  <li key={entry.id} className="flex items-start justify-between gap-3 p-3">
-                    <div className="min-w-0">
-                      <p className="text-[0.84rem] font-medium text-ink-900">{entry.action.replace(/[._]/g, ' ')}</p>
-                      <p className="caption mt-0.5 truncate">
-                        {entry.actorName} · {entry.targetLabel ?? entry.targetType}
-                      </p>
-                    </div>
-                    <span className="micro shrink-0">{relativeTime(entry.createdAt)}</span>
+              <ul className="mt-3 space-y-2">
+                {attention.map((item) => (
+                  <li key={item.key}>
+                    <Link
+                      to={item.to}
+                      className="flex flex-wrap items-start justify-between gap-3 rounded-lg border border-ink-200 px-3 py-2.5 hover:border-brand-300"
+                    >
+                      <span className="min-w-0">
+                        <span className="flex flex-wrap items-center gap-2">
+                          <Badge tone={item.tone}>{item.label}</Badge>
+                        </span>
+                        <span className="mt-1 block text-sm text-ink-600">{item.detail}</span>
+                      </span>
+                      <span className="text-xs font-medium text-brand-700">Open →</span>
+                    </Link>
                   </li>
                 ))}
               </ul>
             )}
           </Card>
 
-          <Card title="Configuration shortcuts">
-            <div className="flex flex-wrap gap-2">
-              <Link to="/admin/settings" className="btn btn-secondary btn-sm">
-                <Settings2 className="size-4" aria-hidden /> System settings
-              </Link>
-              <Link to="/admin/settings?tab=rules" className="btn btn-secondary btn-sm">
-                <ShieldAlert className="size-4" aria-hidden /> Clinical rules
-              </Link>
-              <Link to="/admin/users?status=PENDING_APPROVAL" className="btn btn-secondary btn-sm">
-                <UserPlus className="size-4" aria-hidden /> Approvals
-              </Link>
-              <Link to="/admin/reports" className="btn btn-secondary btn-sm">
-                <Boxes className="size-4" aria-hidden /> Reports
-              </Link>
-              <Link to="/auth/reset-password" className="btn btn-quiet btn-sm">
-                <KeyRound className="size-4" aria-hidden /> Reset my password
-              </Link>
+          <Card className="card-pad">
+            <SectionHeading eyebrow="Accounts" title="Recent registrations" actions={<Link to="/admin/users" className="btn btn-ghost btn-sm">All users</Link>} />
+            {stats.recentRegistrations.length === 0 ? (
+              <EmptyState className="mt-3" icon={<Users className="size-6" aria-hidden />} title="No accounts yet" description="Registration is open from Settings. The first account can claim ADMIN if its email is in the bootstrap list." />
+            ) : (
+              <div className="mt-4">
+                <Timeline
+                  items={stats.recentRegistrations.map((user) => ({
+                    title: (
+                      <span className="flex flex-wrap items-center gap-2">
+                        {user.fullName}
+                        <Badge tone={user.role === 'ADMIN' ? 'purple' : user.role === 'PROVIDER' ? 'brand' : 'neutral'}>{ROLE_LABELS[user.role]}</Badge>
+                        {user.status !== 'ACTIVE' ? <Badge tone="amber">{ACCOUNT_STATUS_LABELS[user.status]}</Badge> : null}
+                      </span>
+                    ),
+                    meta: `${user.email} · joined ${relativeTime(user.createdAt)}${user.lastLoginAt ? ` · last seen ${relativeTime(user.lastLoginAt)}` : ''}`,
+                    tone: user.status === 'ACTIVE' ? 'green' : 'amber',
+                  }))}
+                />
+              </div>
+            )}
+          </Card>
+        </div>
+
+        <div className="space-y-4">
+          <Card className="card-pad">
+            <SectionHeading eyebrow="Deployment" title="System status" />
+            <div className="mt-2">
+              <KeyValueList
+                items={[
+                  { label: 'Data provider', value: system?.provider === 'firebase' ? 'Firebase Firestore' : 'This device (IndexedDB)' },
+                  { label: 'Writable', value: system?.writable ? 'Yes' : system ? 'Read-only' : 'Checking…' },
+                  { label: 'Signed in', value: system?.signedIn ? 'Yes' : 'No' },
+                  { label: 'Records stored', value: system ? String(system.records) : '—' },
+                  { label: 'Firebase', value: integrations.firebase.configured ? `Connected (${integrations.firebase.projectId})` : 'Not configured' },
+                  { label: 'Cloudinary media', value: integrations.cloudinary.configured ? `Connected (${integrations.cloudinary.cloudName})` : 'Not configured' },
+                  { label: 'Web push', value: integrations.push.configured ? 'VAPID key set' : 'Not configured' },
+                ]}
+              />
             </div>
+            {integrations.misconfigured ? (
+              <p className="alert alert-warn mt-3 flex items-start gap-2">
+                <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden />
+                Firebase is only partly configured, so the app is running on this device. See the status page for what is
+                missing and what that changes.
+              </p>
+            ) : null}
+            <div className="mt-3 actions-wrap">
+              <Link to="/status" className="btn btn-secondary btn-sm">Full status page</Link>
+              <Button variant="ghost" size="sm" onClick={() => void diagnostics().then(setSystem)}>Refresh</Button>
+            </div>
+          </Card>
+
+          <Card className="card-pad">
+            <SectionHeading eyebrow="Composition" title="Accounts by role" />
+            <ul className="mt-2 space-y-1.5">
+              {(Object.keys(ROLE_LABELS) as (keyof typeof ROLE_LABELS)[]).map((role) => (
+                <li key={role} className="flex items-center justify-between gap-3 text-sm">
+                  <span className="text-ink-700">{ROLE_LABELS[role]}</span>
+                  <Badge tone={stats.byRole[role] ? 'brand' : 'neutral'}>{stats.byRole[role] ?? 0}</Badge>
+                </li>
+              ))}
+            </ul>
+            <p className="mt-3 text-xs text-ink-500">
+              Role changes are written to the audit log with your name and take effect at the user's next sign-in.
+            </p>
+          </Card>
+
+          <Card className="card-pad">
+            <SectionHeading eyebrow="Content health" title="Review window" />
+            <p className="mt-2 text-sm text-ink-600">
+              Published articles are re-checked every{' '}
+              <strong className="font-semibold text-ink-800">{settings?.contentReviewReminderDays ?? 365} days</strong>.{' '}
+              {stats.stale > 0
+                ? `${stats.stale} article${stats.stale === 1 ? ' is' : 's are'} past that window now.`
+                : 'Everything is inside the window.'}
+            </p>
+            <div className="mt-3 actions-wrap">
+              <Link to="/admin/articles" className="btn btn-secondary btn-sm">Review articles</Link>
+              <Link to="/admin/settings" className="btn btn-ghost btn-sm">Change the window</Link>
+            </div>
+          </Card>
+
+          <Card className="card-pad border-ink-200 bg-ink-50">
+            <h3 className="card-title">Administrator ground rules</h3>
+            <ul className="checklist mt-2 text-sm">
+              <li>Never edit a patient's health record — only they and their linked provider can.</li>
+              <li>Approve providers against a real licence number, not a plausible-looking one.</li>
+              <li>Record a reason when you reject, suspend or delete; it is shown to the person affected.</li>
+              <li>Exports are logged. Treat any CSV as a clinical record once it leaves this screen.</li>
+            </ul>
+            <p className="mt-2 text-xs text-ink-500">Last audit write: {formatDate(new Date(), 'long')}</p>
           </Card>
         </div>
       </div>
-    </AppShell>
+    </StaffShell>
   );
 }
 
-function IntegrationRow({ label, ok, detail }: { label: string; ok: boolean; detail: string }) {
+function KeyValueList({ items }: { items: { label: string; value: string }[] }) {
   return (
-    <li className="flex items-start gap-2.5">
-      <span className={`mt-1 size-2 shrink-0 rounded-full ${ok ? 'bg-[var(--color-risk-green)]' : 'bg-[var(--color-risk-amber)]'}`} aria-hidden />
-      <div className="min-w-0">
-        <p className="text-[0.84rem] font-semibold text-ink-900">{label}</p>
-        <p className="caption mt-0.5 break-all">{detail}</p>
-      </div>
-    </li>
+    <dl className="divide-y divide-ink-100">
+      {items.map((item) => (
+        <div key={item.label} className="flex items-center justify-between gap-3 py-1.5">
+          <dt className="text-sm text-ink-500">{item.label}</dt>
+          <dd className="text-sm font-medium text-ink-800">{item.value}</dd>
+        </div>
+      ))}
+    </dl>
   );
-}
-
-/** Facility to pre-select for an approval: the first configured one. */
-function firstFacilityId(facilities?: Facility[]): string {
-  return facilities?.[0]?.id ?? '';
 }

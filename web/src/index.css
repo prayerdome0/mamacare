@@ -429,6 +429,31 @@
   .prose-mamacare a {
     @apply font-medium text-brand-800 underline decoration-brand-300 underline-offset-2;
   }
+
+  /* ── Small shared pieces used across screens ─────────────────────── */
+  /* A card's own heading — smaller than `.h3`, which is for sections. */
+  .card-title {
+    @apply text-[0.98rem] leading-snug font-semibold text-ink-900;
+  }
+  /* Large initial avatar, used where no photo has been uploaded. */
+  .avatar-lg {
+    @apply grid size-12 shrink-0 place-items-center rounded-xl text-sm font-bold;
+  }
+  /* A tick list: the shape used for guidance, checklists and policy points. */
+  .checklist {
+    @apply space-y-2;
+  }
+  .checklist > li {
+    @apply relative pl-6 text-[0.9rem] leading-relaxed text-ink-700;
+  }
+  .checklist > li::before {
+    content: '';
+    @apply absolute top-[0.35rem] left-0 size-4 rounded-full bg-brand-100;
+  }
+  .checklist > li::after {
+    content: '';
+    @apply absolute top-[0.62rem] left-[0.28rem] h-[0.42rem] w-[0.22rem] rotate-45 border-r-2 border-b-2 border-brand-700;
+  }
 }
 
 @keyframes toast-in {

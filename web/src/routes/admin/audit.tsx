@@ -1,247 +1,308 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
-import { ClipboardList, Download, RefreshCw, ShieldCheck } from 'lucide-react';
-import { AppShell } from '@/components/layout/shell';
-import { Card, StatCard } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Badge, EmptyState, ErrorState, NoticeState } from '@/components/ui/display';
-import { DataTable, type Column } from '@/components/ui/table';
-import { Field, SearchInput, Select, TextInput } from '@/components/ui/form';
-import { useAsync, useDebouncedValue } from '@/hooks';
-import { useToast } from '@/components/ui/toast';
-import { services } from '@/services/session-store';
-import { auditActionLabel, exportAuditLogs, listAuditLogs, type AuditFilters } from '@/services/admin/audit-service';
-import { AUDIT_ACTIONS, type AuditAction, type AuditLogEntry } from '@/types/domain';
-import { addDays, formatDateTime, humanize, relativeTime, toIsoDate } from '@/lib/utils';
-
-const TARGET_TYPES = ['user', 'mother', 'pregnancy', 'anc_visit', 'alert', 'referral', 'appointment', 'report', 'document', 'facility', 'notification', 'rule', 'settings', 'media', 'session'];
-
 /**
- * The audit log. Append-only rows written by the data layer on every meaningful
- * action, with deliberately small metadata — enough to reconstruct who did what,
- * never enough to leak a clinical record.
+ * Administrator — audit log.
+ *
+ * Every consequential write in the platform records who did it, to what, and when:
+ * sign-ins, role changes, provider approvals, content publishing, record edits,
+ * exports and deletions. This screen exists so a mother can ask “who looked at my
+ * record?” and get an answer, and so an administrator's own actions are as visible
+ * as anyone else's.
  */
-export default function AdminAuditPage() {
+
+import { useEffect, useMemo, useState } from 'react';
+import {
+  Download,
+  FileClock,
+  RefreshCw,
+  ScrollText,
+  Search,
+  ShieldCheck,
+  UserCog,
+} from 'lucide-react';
+import { useAsync } from '@/hooks';
+import { AUDIT_ACTION_LABELS, readAuditLog } from '@/services/audit';
+import { logAudit } from '@/services/audit';
+import { useSession } from '@/providers/app-providers';
+import { downloadBlob, formatDate, formatDateTime, relativeTime, toCsv, toIsoDate, truncate } from '@/lib/utils';
+import type { AuditAction, AuditLogEntry } from '@/types/domain';
+import { StaffPageHeader, StaffShell } from '@/components/layout/staff-shell';
+import { Button } from '@/components/ui/button';
+import { Card, KeyValue, SectionHeading, StatCard } from '@/components/ui/card';
+import { Badge, ErrorState, LoadingRows } from '@/components/ui/display';
+import { SearchInput, Select } from '@/components/ui/form';
+import { DataTable, type Column } from '@/components/ui/table';
+import { SegmentedControl } from '@/components/ui/tabs';
+import { useToast } from '@/components/ui/toast';
+
+type TimeRange = 'today' | 'week' | 'month' | 'ALL';
+
+const ROLE_TONES: Record<AuditLogEntry['actorRole'], 'purple' | 'brand' | 'blue' | 'neutral'> = {
+  ADMIN: 'purple',
+  FACILITY_ADMIN: 'blue',
+  PROVIDER: 'brand',
+  MOTHER: 'neutral',
+  SUPPORTER: 'neutral',
+  SYSTEM: 'neutral',
+};
+
+export default function AdminAudit() {
+  const { actor } = useSession();
   const toast = useToast();
-  const [filters, setFilters] = useState<AuditFilters>({ limit: 200, from: toIsoDate(addDays(new Date(), -30)) });
-  const [term, setTerm] = useState('');
-  const search = useDebouncedValue(term, 300);
-  const [exporting, setExporting] = useState(false);
+  const [range, setRange] = useState<TimeRange>('week');
+  const [action, setAction] = useState<AuditAction | 'ALL'>('ALL');
+  const [search, setSearch] = useState('');
+  const [mineOnly, setMineOnly] = useState(false);
+
+  const { data, loading, error, retryable, run } = useAsync(() => readAuditLog(1000), { immediate: true });
+  const entries = useMemo<AuditLogEntry[]>(() => data ?? [], [data]);
+
+  const filtered = useMemo(() => {
+    const now = Date.now();
+    const cutoff =
+      range === 'today'
+        ? toIsoDate(new Date())
+        : range === 'week'
+          ? new Date(now - 7 * 86_400_000).toISOString()
+          : range === 'month'
+            ? new Date(now - 30 * 86_400_000).toISOString()
+            : null;
+    const term = search.trim().toLowerCase();
+    return entries.filter((entry) => {
+      if (action !== 'ALL' && entry.action !== action) return false;
+      if (mineOnly && entry.actorId !== actor?.uid) return false;
+      if (cutoff && (!entry.createdAt || entry.createdAt < cutoff)) return false;
+      if (!term) return true;
+      return [entry.actorName, entry.actorRole, AUDIT_ACTION_LABELS[entry.action], entry.targetType, entry.targetId ?? '', entry.detail ?? '']
+        .join(' ')
+        .toLowerCase()
+        .includes(term);
+    });
+  }, [entries, range, action, search, mineOnly, actor?.uid]);
+
+  const stats = useMemo(() => {
+    const today = toIsoDate(new Date());
+    const actors = new Set(entries.map((entry) => entry.actorId));
+    const byAction = entries.reduce<Record<string, number>>((acc, entry) => {
+      acc[entry.action] = (acc[entry.action] ?? 0) + 1;
+      return acc;
+    }, {});
+    const top = Object.entries(byAction).sort((a, b) => b[1] - a[1]).slice(0, 6);
+    const sensitive = entries.filter((entry) =>
+      ['role-change', 'status-change', 'provider-approval', 'account-delete', 'data-export', 'content-publish', 'settings-change'].includes(entry.action),
+    ).length;
+    return {
+      total: entries.length,
+      today: entries.filter((entry) => (entry.createdAt ?? '').startsWith(today)).length,
+      actors: actors.size,
+      sensitive,
+      deletions: entries.filter((entry) => entry.action === 'record-delete' || entry.action === 'account-delete').length,
+      exports: entries.filter((entry) => entry.action === 'data-export').length,
+      top,
+      oldest: entries.map((entry) => entry.createdAt).filter(Boolean).sort()[0] ?? null,
+    };
+  }, [entries]);
 
   useEffect(() => {
-    setFilters((current) => ({ ...current, search: search || undefined }));
-  }, [search]);
+    document.title = 'Audit log · Mama Care admin';
+  }, []);
 
-  const logs = useAsync(() => listAuditLogs(filters), { deps: [JSON.stringify(filters)] });
-  const staff = useAsync(() => services().data.list('users', { limit: 400 }), {});
-  const facilities = useAsync(() => services().data.allFacilities(), {});
-
-  const rows = useMemo(() => logs.data ?? [], [logs.data]);
+  const exportCsv = async (): Promise<void> => {
+    const csv = toCsv(
+      ['Timestamp', 'Actor', 'Role', 'Action', 'Target type', 'Target id', 'Detail'],
+      filtered.map((entry) => [
+        entry.createdAt ?? '',
+        entry.actorName,
+        entry.actorRole,
+        AUDIT_ACTION_LABELS[entry.action],
+        entry.targetType,
+        entry.targetId ?? '',
+        entry.detail ?? '',
+      ]),
+    );
+    downloadBlob(new Blob([csv], { type: 'text/csv;charset=utf-8' }), `mamacare-audit-${toIsoDate(new Date())}.csv`);
+    await logAudit('data-export', 'audit_logs', actor?.uid ?? null, `Exported ${filtered.length} audit entries`);
+    toast.success('Export ready', 'Exporting the audit log is itself audited.');
+  };
 
   const columns: Column<AuditLogEntry>[] = [
     {
       key: 'when',
       header: 'When',
+      width: '11rem',
+      sortValue: (row) => row.createdAt ?? '',
       render: (row) => (
-        <div>
-          <p className="text-[0.84rem] font-medium text-ink-900">{formatDateTime(row.createdAt)}</p>
-          <p className="caption mt-0.5">{relativeTime(row.createdAt)}</p>
-        </div>
+        <span className="block">
+          <span className="block text-xs font-medium text-ink-800">{row.createdAt ? formatDateTime(row.createdAt) : '—'}</span>
+          <span className="block text-xs text-ink-500">{relativeTime(row.createdAt)}</span>
+        </span>
       ),
-      sortValue: (row) => row.createdAt,
     },
     {
       key: 'actor',
       header: 'Who',
+      sortValue: (row) => row.actorName,
       render: (row) => (
-        <div className="min-w-0">
-          <p className="truncate text-[0.86rem] font-semibold text-ink-900">{row.actorName}</p>
-          <p className="caption mt-0.5">
-            {row.actorRole === 'SYSTEM' ? 'system' : humanize(row.actorRole)}
-            {row.facilityId ? ` · ${(facilities.data ?? []).find((item) => item.id === row.facilityId)?.name ?? 'facility'}` : ''}
-          </p>
-        </div>
+        <span className="block">
+          <span className="flex flex-wrap items-center gap-2">
+            <span className="truncate text-sm font-medium text-ink-800">{row.actorName || 'Unknown'}</span>
+            <Badge tone={ROLE_TONES[row.actorRole] ?? 'neutral'}>{row.actorRole}</Badge>
+          </span>
+          {row.actorId === actor?.uid ? <span className="block text-xs text-brand-700">this is you</span> : null}
+        </span>
       ),
     },
     {
       key: 'action',
       header: 'Action',
+      width: '12rem',
+      sortValue: (row) => row.action,
       render: (row) => (
-        <div className="min-w-0">
-          <p className="text-[0.86rem] text-ink-900">{auditActionLabel(row.action)}</p>
-          <p className="micro mt-0.5 break-all">{row.action}</p>
-        </div>
+        <Badge tone={row.action.includes('delete') ? 'red' : row.action === 'data-export' ? 'amber' : row.action === 'content-publish' || row.action === 'provider-approval' ? 'brand' : 'neutral'}>
+          {AUDIT_ACTION_LABELS[row.action]}
+        </Badge>
       ),
     },
     {
       key: 'target',
-      header: 'Object',
-      render: (row) => (
-        <div className="min-w-0">
-          <p className="truncate text-[0.84rem] text-ink-800">{row.targetLabel ?? row.targetId}</p>
-          <p className="caption mt-0.5">
-            <Badge tone="neutral">{humanize(row.targetType)}</Badge>
-          </p>
-        </div>
-      ),
+      header: 'Target',
       hideBelow: 'md',
+      width: '10rem',
+      render: (row) => (
+        <span className="block text-xs text-ink-600">
+          {row.targetType}
+          {row.targetId ? <span className="block truncate text-ink-500">{truncate(row.targetId, 26)}</span> : null}
+        </span>
+      ),
     },
     {
-      key: 'meta',
+      key: 'detail',
       header: 'Detail',
-      render: (row) => {
-        const entries = Object.entries(row.metadata ?? {}).filter(([, value]) => value !== null && value !== '' && value !== undefined);
-        if (entries.length === 0) return <span className="caption">—</span>;
-        return (
-          <ul className="space-y-0.5">
-            {entries.slice(0, 3).map(([key, value]) => (
-              <li key={key} className="caption">
-                <span className="font-medium text-ink-600">{key}</span> {String(value)}
-              </li>
-            ))}
-          </ul>
-        );
-      },
-      hideBelow: 'lg',
+      render: (row) => <span className="block text-sm text-ink-700">{row.detail ?? '—'}</span>,
     },
   ];
 
-  const byAction = useMemo(() => {
-    const map = new Map<string, number>();
-    for (const row of rows) map.set(row.action, (map.get(row.action) ?? 0) + 1);
-    return [...map.entries()].sort((a, b) => b[1] - a[1]);
-  }, [rows]);
-
-  const exportCsv = async () => {
-    setExporting(true);
-    try {
-      const result = await exportAuditLogs(filters);
-      toast.success('Export prepared', `${result.rows} entries written to ${result.fileName}.`);
-    } catch (error) {
-      toast.error(error, 'The export failed');
-    } finally {
-      setExporting(false);
-    }
-  };
-
   return (
-    <AppShell
-      title="Audit log"
-      subtitle={`${rows.length} entr${rows.length === 1 ? 'y' : 'ies'} in the current window`}
-      actions={
-        <>
-          <Button size="sm" variant="secondary" loading={logs.loading} onClick={() => void logs.run()} icon={<RefreshCw className="size-4" aria-hidden />}>
-            Refresh
-          </Button>
-          <Button size="sm" variant="secondary" onClick={() => void exportCsv()} loading={exporting} icon={<Download className="size-4" aria-hidden />}>
-            Export CSV
-          </Button>
-        </>
-      }
-    >
-      <div className="mb-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <StatCard label="Entries shown" value={rows.length} hint={filters.from ? `since ${filters.from}` : 'all time'} loading={logs.loading} />
-        <StatCard label="Distinct actions" value={byAction.length} hint="In this window" />
-        <StatCard label="Most frequent" value={byAction[0] ? auditActionLabel(byAction[0][0] as AuditAction) : '—'} hint={byAction[0] ? `${byAction[0][1]} entries` : ''} />
-        <StatCard label="Privilege changes" value={rows.filter((row) => row.action.startsWith('user.') || row.action === 'rule.updated').length} hint="Role, status and rule edits" tone={rows.some((row) => row.action.startsWith('user.role')) ? 'amber' : 'default'} />
+    <StaffShell portal="Admin Dashboard">
+      <StaffPageHeader
+        title="Audit log"
+        description="Who did what, to which record, and when. Append-only: entries are never edited, and reading this page is not itself logged."
+        actions={
+          <>
+            <Button variant="ghost" size="sm" onClick={() => void run()} icon={<RefreshCw className="size-4" aria-hidden />}>
+              Refresh
+            </Button>
+            <Button variant="secondary" size="sm" onClick={() => void exportCsv()} disabled={filtered.length === 0} icon={<Download className="size-4" aria-hidden />}>
+              Export CSV
+            </Button>
+          </>
+        }
+      />
+
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <StatCard label="Entries loaded" value={stats.total} icon={<ScrollText className="size-4" aria-hidden />} hint={stats.oldest ? `since ${formatDate(stats.oldest, 'day')}` : undefined} />
+        <StatCard label="Written today" value={stats.today} icon={<FileClock className="size-4" aria-hidden />} tone={stats.today > 0 ? 'brand' : 'default'} onClick={() => setRange('today')} />
+        <StatCard label="Distinct actors" value={stats.actors} icon={<UserCog className="size-4" aria-hidden />} />
+        <StatCard
+          label="Sensitive actions"
+          value={stats.sensitive}
+          icon={<ShieldCheck className="size-4" aria-hidden />}
+          tone={stats.sensitive > 0 ? 'amber' : 'green'}
+          hint={`${stats.deletions} deletions · ${stats.exports} exports`}
+          onClick={() => setAction('data-export')}
+        />
       </div>
 
-      <Card className="mb-4" bodyClassName="p-3 sm:p-4">
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
-          <SearchInput value={term} onValueChange={setTerm} placeholder="Search actor, action or object" className="xl:col-span-2" />
-          <Field label="Action">
+      <Card className="card-pad mt-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <SegmentedControl
+            value={range}
+            onChange={setRange}
+            ariaLabel="Time window"
+            options={[
+              { value: 'today', label: 'Today' },
+              { value: 'week', label: '7 days' },
+              { value: 'month', label: '30 days' },
+              { value: 'ALL', label: 'Everything' },
+            ]}
+          />
+          <div className="flex flex-wrap items-center gap-3">
             <Select
-              value={filters.action ?? 'ALL'}
-              options={[{ value: 'ALL', label: 'Any action' }, ...AUDIT_ACTIONS.map((action) => ({ value: action, label: auditActionLabel(action) }))]}
-              onValueChange={(value) => setFilters({ ...filters, action: value === 'ALL' ? undefined : (value as AuditAction) })}
+              aria-label="Filter by action"
+              value={action}
+              onChange={(event) => setAction(event.target.value as AuditAction | 'ALL')}
+              options={[
+                { value: 'ALL', label: 'All actions' },
+                ...(Object.keys(AUDIT_ACTION_LABELS) as AuditAction[]).map((value) => ({ value, label: AUDIT_ACTION_LABELS[value] })),
+              ]}
+              className="w-auto min-w-[13rem]"
             />
-          </Field>
-          <Field label="Object type">
-            <Select
-              value={filters.targetType ?? ''}
-              options={[{ value: '', label: 'Any type' }, ...TARGET_TYPES.map((type) => ({ value: type, label: humanize(type) }))]}
-              onValueChange={(value) => setFilters({ ...filters, targetType: value || null })}
-              placeholder="Any type"
-            />
-          </Field>
-          <Field label="Facility">
-            <Select
-              value={filters.facilityId ?? ''}
-              options={(facilities.data ?? []).map((row) => ({ value: row.id, label: row.name }))}
-              onValueChange={(value) => setFilters({ ...filters, facilityId: value || null })}
-              placeholder="Any facility"
-            />
-          </Field>
-          <Field label="Actor">
-            <Select
-              value={filters.actorId ?? ''}
-              options={(staff.data?.rows ?? []).map((row) => ({ value: row.id, label: row.fullName }))}
-              onValueChange={(value) => setFilters({ ...filters, actorId: value || null })}
-              placeholder="Anyone"
-            />
-          </Field>
-          <Field label="From">
-            <TextInput type="date" value={filters.from ?? ''} onChange={(event) => setFilters({ ...filters, from: event.target.value || null })} />
-          </Field>
-          <Field label="To">
-            <TextInput type="date" value={filters.to ?? ''} onChange={(event) => setFilters({ ...filters, to: event.target.value || null })} />
-          </Field>
-          <div className="flex items-end">
-            <Button
-              variant="ghost"
-              onClick={() => {
-                setTerm('');
-                setFilters({ limit: 200 });
-              }}
-            >
-              Reset filters
-            </Button>
+            <SearchInput value={search} onValueChange={setSearch} placeholder="Search actor, target or detail" className="w-full sm:max-w-xs" />
           </div>
+        </div>
+        <div className="mt-3">
+          <Button variant={mineOnly ? 'primary' : 'secondary'} size="sm" onClick={() => setMineOnly((current) => !current)} icon={<Search className="size-4" aria-hidden />}>
+            {mineOnly ? 'Showing only my actions' : 'Show only my actions'}
+          </Button>
         </div>
       </Card>
 
-      {logs.error ? <div className="mb-4"><ErrorState message={logs.error} onRetry={() => void logs.run()} /></div> : null}
-
-      <Card bodyClassName="p-0">
-        {rows.length === 0 && !logs.loading ? (
-          <EmptyState
-            icon={<ClipboardList className="size-5" aria-hidden />}
-            title="No audit entries in this window"
-            description="Widen the date range or clear the filters. Entries are written as actions happen; there is no backfill for time before the platform was used."
+      <Card className="card-pad mt-4">
+        {error ? <ErrorState title="The audit log could not be loaded" message={error} onRetry={retryable ? run : undefined} /> : null}
+        {loading ? <LoadingRows rows={6} /> : null}
+        {!loading && !error ? (
+          <DataTable
+            rows={filtered}
+            columns={columns}
+            rowKey={(row) => row.id}
+            caption="Audit entries, newest first"
+            pageSize={25}
+            emptyTitle="No entries in this window"
+            emptyDescription="Widen the time range, or clear the filters. Sign-ins and record writes both appear here."
           />
-        ) : (
-          <DataTable rows={rows} columns={columns} rowKey={(row) => row.id} loading={logs.loading} dense pageSize={50} caption="Audit entries" />
-        )}
+        ) : null}
       </Card>
 
       <div className="mt-4 grid gap-4 lg:grid-cols-2">
-        <NoticeState tone="info" title="What is deliberately not here" compact>
-          Audit rows carry an action, an actor, the object type and a few fields of context — never a blood pressure reading, a diagnosis or a phone number.
-          That keeps the log shareable for supervision without exposing patient data.
-        </NoticeState>
-        <Card title="Common trails" description="Which actions to look for when reviewing a period." bodyClassName="p-0">
-          <ul className="divide-y divide-ink-100">
-            {byAction.slice(0, 6).map(([action, count]) => (
-              <li key={action} className="flex items-center justify-between gap-3 p-3">
-                <div className="min-w-0">
-                  <p className="text-[0.84rem] font-medium text-ink-900">{auditActionLabel(action as AuditAction)}</p>
-                  <p className="micro mt-0.5 break-all">{action}</p>
-                </div>
-                <span className="tnum text-[0.9rem] font-semibold text-ink-800">{count}</span>
-              </li>
-            ))}
-          </ul>
+        <Card className="card-pad">
+          <SectionHeading eyebrow="Distribution" title="Most frequent actions" />
+          {stats.top.length === 0 ? (
+            <p className="mt-2 text-sm text-ink-600">Nothing recorded yet.</p>
+          ) : (
+            <ul className="mt-3 space-y-2">
+              {stats.top.map(([key, count]) => (
+                <li key={key} className="flex items-center justify-between gap-3">
+                  <span className="text-sm text-ink-700">{AUDIT_ACTION_LABELS[key as AuditAction] ?? key}</span>
+                  <span className="flex items-center gap-2">
+                    <span className="h-2 w-24 overflow-hidden rounded-full bg-ink-100">
+                      <span className="block h-full rounded-full bg-brand-600" style={{ width: `${(count / Math.max(stats.top[0]?.[1] ?? 1, 1)) * 100}%` }} />
+                    </span>
+                    <Badge tone="neutral">{count}</Badge>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Card>
+
+        <Card className="card-pad">
+          <SectionHeading eyebrow="Accountability" title="What this log is for" />
+          <KeyValue
+            columns={1}
+            dense
+            items={[
+              { label: 'Written by', value: 'Every consequential action in the app' },
+              { label: 'Editable', value: 'No — entries are append-only' },
+              { label: 'Visible to', value: 'Administrators only' },
+              { label: 'Includes', value: 'Actor name, role, action, target, detail, timestamp' },
+              { label: 'Excludes', value: 'Clinical values, message bodies and document contents' },
+              { label: 'Oldest entry', value: stats.oldest ? formatDate(stats.oldest, 'long') : '—' },
+            ]}
+          />
+          <p className="mt-3 text-sm text-ink-600">
+            A patient can ask what happened to her record and when. Answer from this log, not from memory — and remember that
+            your own exports and role changes are in it too.
+          </p>
         </Card>
       </div>
-
-      <p className="caption mt-4 flex items-center gap-1.5">
-        <ShieldCheck className="size-3.5" aria-hidden />
-        Entries cannot be edited or deleted from this screen — the collection is append-only in the security rules. See{' '}
-        <Link to="/admin/settings" className="font-semibold text-brand-800 hover:underline">
-          settings
-        </Link>{' '}
-        for who may change privileges.
-      </p>
-    </AppShell>
+    </StaffShell>
   );
 }

@@ -53,13 +53,6 @@
     ],
     "rewrites": [
       {
-        "source": "/api/**",
-        "run": {
-          "serviceId": "mamacare-api",
-          "region": "us-central1"
-        }
-      },
-      {
         "source": "**",
         "destination": "/index.html"
       }

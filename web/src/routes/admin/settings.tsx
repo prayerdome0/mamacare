@@ -1,561 +1,445 @@
-import { useEffect, useMemo, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
-import { Check, Database, RefreshCw, RotateCcw, Save, ShieldAlert, SlidersHorizontal } from 'lucide-react';
-import { AppShell } from '@/components/layout/shell';
-import { Card, KeyValue } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Badge, EmptyState, ErrorState, LoadingRows, NoticeState } from '@/components/ui/display';
-import { DataTable, type Column } from '@/components/ui/table';
-import { Field, Select, Switch, TextInput } from '@/components/ui/form';
-import { Tabs, TabPanel } from '@/components/ui/tabs';
-import { Modal } from '@/components/ui/overlay';
-import { useAsync } from '@/hooks';
-import { useForm } from '@/hooks/use-form';
-import { useToast } from '@/components/ui/toast';
-import { useConfirm, useSession } from '@/providers/app-providers';
-import { loadSettings, listRules, resetRulesToDefaults, saveRule, saveSettings } from '@/services/admin/settings-service';
-import { systemSettingsSchema } from '@/lib/validation';
-import { integrations } from '@/config/env';
-import { formatDate, toIsoDate } from '@/lib/utils';
-import { RULES_VERSION } from '@/services/clinical/rules';
-import { fieldLabel } from '@/services/clinical/alert-engine';
-import type { RuleGroup, RuleOperator } from '@/types/domain';
-import { PREFERRED_LANGUAGES, type RiskLevel } from '@/types/domain';
-import type { AlertRule } from '@/types/domain';
-import type { RuleView } from '@/services/admin/settings-service';
-
-const REMINDER_OPTIONS = [14, 7, 3, 1];
-
 /**
- * Administrator settings: the platform-wide switches, and the clinical rule set
- * that turns observations into alerts. Both are stored as data — the alert engine
- * reads these rows at evaluation time, so a change takes effect without a deploy.
+ * Administrator — platform settings.
+ *
+ * The handful of switches that change behaviour for everybody: whether registration
+ * is open, whether providers need verification, how often published guidance must be
+ * re-checked, who to call in an emergency, and whether the site is in maintenance.
+ *
+ * Each one is explained in terms of what a mother will actually experience, because
+ * a setting named “providerApprovalsRequired” tells an operator nothing about the
+ * trust decision it represents.
  */
-export default function AdminSettingsPage() {
-  const [params, setParams] = useSearchParams();
-  const tab = params.get('tab') === 'rules' ? 'rules' : 'general';
-  const setTab = (id: string) => {
-    const next = new URLSearchParams(params);
-    if (id === 'general') next.delete('tab');
-    else next.set('tab', id);
-    setParams(next, { replace: true });
-  };
 
-  return (
-    <AppShell
-      title="System settings"
-      subtitle="Everything here is stored as data and takes effect on the next read — no rebuild."
-      actions={
-        <a href="/api/health" target="_blank" rel="noreferrer" className="btn btn-secondary btn-sm">
-          <Database className="size-4" aria-hidden /> API health
-        </a>
-      }
-    >
-      <div className="mb-4">
-        <Tabs
-          ariaLabel="Settings sections"
-          value={tab}
-          onChange={setTab}
-          items={[
-            { id: 'general', label: 'General', icon: <SlidersHorizontal className="size-4" aria-hidden /> },
-            { id: 'rules', label: 'Clinical rules', icon: <ShieldAlert className="size-4" aria-hidden /> },
-          ]}
-        />
-      </div>
+import { useEffect, useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Database,
+  Globe,
+  LifeBuoy,
+  Phone,
+  Plus,
+  Save,
+  ShieldCheck,
+  Trash2,
+  Wrench,
+} from 'lucide-react';
+import { useAsync } from '@/hooks';
+import { settingsRepo } from '@/services/repositories';
+import { logAudit } from '@/services/audit';
+import { useConfirm, useSession } from '@/providers/app-providers';
+import { app, dataProvider, environmentChecks, integrations } from '@/config/env';
+import { APP_VERSION, EMERGENCY_CONTACTS, SITE } from '@/config/site-content';
+import { COUNTRIES, countryOptions } from '@/config/geo';
+import { wipe } from '@/services/data/local/store';
+import { settingsSchema, validate, type SettingsValues } from '@/lib/validation';
+import type { SystemSettings } from '@/types/domain';
+import { StaffPageHeader, StaffShell } from '@/components/layout/staff-shell';
+import { Button } from '@/components/ui/button';
+import { Card, KeyValue, SectionHeading } from '@/components/ui/card';
+import { Badge, ErrorState, LoadingRows } from '@/components/ui/display';
+import { CheckboxRow, Field, FieldGrid, NumberField, Select, Switch, TextArea, TextInput } from '@/components/ui/form';
+import { useToast } from '@/components/ui/toast';
 
-      <TabPanel id="general" active={tab === 'general'}>
-        <GeneralSettings />
-      </TabPanel>
-      <TabPanel id="rules" active={tab === 'rules'}>
-        <RulesSettings />
-      </TabPanel>
-    </AppShell>
-  );
-}
-
-function GeneralSettings() {
-  const toast = useToast();
-  const { providerKind } = useSession();
-  const settings = useAsync(() => loadSettings(), {});
-  const view = settings.data;
-
-  const form = useForm(systemSettingsSchema, {
-    patientIdPrefix: 'MC',
-    reminderDaysDefault: [7, 1],
-    smsEnabled: false,
-    pushEnabled: true,
-    registrationRequiresApproval: true,
-    allowPatientAccountSelfRegistration: true,
-    defaultLanguage: 'English',
-    dataRetentionPolicy: '',
-    clinicalRulesReviewedBy: '',
-    clinicalRulesReviewedAt: '',
-  });
-
-  useEffect(() => {
-    if (!view) return;
-    form.setValues({
-      patientIdPrefix: view.patientIdPrefix,
-      reminderDaysDefault: view.reminderDaysDefault,
-      smsEnabled: view.smsEnabled,
-      pushEnabled: view.pushEnabled,
-      registrationRequiresApproval: view.registrationRequiresApproval,
-      allowPatientAccountSelfRegistration: view.allowPatientAccountSelfRegistration,
-      defaultLanguage: view.defaultLanguage,
-      dataRetentionPolicy: view.dataRetentionPolicy,
-      clinicalRulesReviewedBy: view.clinicalRulesReviewedBy ?? '',
-      clinicalRulesReviewedAt: view.clinicalRulesReviewedAt ? view.clinicalRulesReviewedAt.slice(0, 10) : '',
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view?.updatedAt]);
-
-  const toggleReminder = (days: number) => {
-    const current = form.values.reminderDaysDefault ?? [];
-    const next = current.includes(days) ? current.filter((item) => item !== days) : [...current, days].sort((a, b) => b - a);
-    form.setField('reminderDaysDefault', next);
-  };
-
-  const save = async () => {
-    await form.submit(async (values) => {
-      try {
-        const saved = await saveSettings({
-          patientIdPrefix: values.patientIdPrefix.toUpperCase(),
-          reminderDaysDefault: values.reminderDaysDefault,
-          smsEnabled: values.smsEnabled,
-          pushEnabled: values.pushEnabled,
-          registrationRequiresApproval: values.registrationRequiresApproval,
-          allowPatientAccountSelfRegistration: values.allowPatientAccountSelfRegistration,
-          defaultLanguage: values.defaultLanguage,
-          dataRetentionPolicy: values.dataRetentionPolicy || 'Not documented',
-          clinicalRulesReviewedBy: values.clinicalRulesReviewedBy || null,
-          clinicalRulesReviewedAt: values.clinicalRulesReviewedAt ? new Date(values.clinicalRulesReviewedAt).toISOString() : null,
-        });
-        toast.success('Settings saved', `Applied to this deployment immediately · privilege-sensitive switches are audited.`);
-        settings.setData(saved);
-      } catch (error) {
-        toast.error(error, 'The settings were not saved');
-        throw error;
-      }
-    });
-  };
-
-  if (settings.loading && !view) {
-    return (
-      <Card>
-        <LoadingRows rows={5} />
-      </Card>
-    );
-  }
-
-  if (settings.error || !view) {
-    return <ErrorState title="Settings could not be loaded" message={settings.error ?? 'Unknown error.'} onRetry={() => void settings.run()} />;
-  }
-
-  return (
-    <div className="grid gap-4 xl:grid-cols-[1.4fr_1fr]">
-      <div className="space-y-4">
-        <Card title="Record identifiers and reminders" description="The patient ID prefix and the default reminder offsets used when a new appointment is booked.">
-          <div className="grid gap-3 sm:grid-cols-2">
-            <Field label="Patient ID prefix" error={form.errors.patientIdPrefix} required hint="Ids look like MC-000245 and are unique per deployment.">
-              <TextInput value={form.values.patientIdPrefix} onValueChange={(value) => form.setField('patientIdPrefix', value.toUpperCase())} maxLength={6} />
-            </Field>
-            <Field label="Default language" error={form.errors.defaultLanguage} required hint="Pre-selected for new registrations and reading material.">
-              <Select
-                value={form.values.defaultLanguage}
-                options={PREFERRED_LANGUAGES.map((language) => ({ value: language, label: language }))}
-                onValueChange={(value) => form.setField('defaultLanguage', value)}
-                placeholder={null}
-              />
-            </Field>
-          </div>
-
-          <Field label="Reminder offsets" error={form.errors.reminderDaysDefault} required className="mt-3" hint="Days before an appointment at which a reminder is queued.">
-            <div className="flex flex-wrap gap-2">
-              {REMINDER_OPTIONS.map((days) => (
-                <button
-                  key={days}
-                  type="button"
-                  onClick={() => toggleReminder(days)}
-                  className={`chip ${form.values.reminderDaysDefault.includes(days) ? 'chip-active' : ''}`}
-                  aria-pressed={form.values.reminderDaysDefault.includes(days)}
-                >
-                  {days} days before
-                </button>
-              ))}
-            </div>
-          </Field>
-        </Card>
-
-        <Card title="Channels and access" description="Switches that change what the platform is allowed to do.">
-          <div className="space-y-3.5">
-            <Switch
-              checked={form.values.pushEnabled}
-              onChange={(value) => form.setField('pushEnabled', value)}
-              label="Push notifications"
-              description={`Sends an in-app message to every registered device. ${integrations.push.configured ? 'A VAPID key is present, so delivery is possible.' : 'No VAPID key is configured, so notifications stay in-app only.'}`}
-            />
-            <Switch
-              checked={form.values.smsEnabled}
-              onChange={(value) => form.setField('smsEnabled', value)}
-              label="SMS reminders"
-              description="Queued through the server-side SMS provider only. Requires an approved provider and its keys on the API service — never in the browser."
-            />
-            <Switch
-              checked={form.values.registrationRequiresApproval}
-              onChange={(value) => form.setField('registrationRequiresApproval', value)}
-              label="Health worker registrations need approval"
-              description="Keeps a self-registered account locked out of clinical records until an administrator assigns a role."
-            />
-            <Switch
-              checked={form.values.allowPatientAccountSelfRegistration}
-              onChange={(value) => form.setField('allowPatientAccountSelfRegistration', value)}
-              label="Mothers may create their own login"
-              description="When off, only staff can create a mother’s portal account, from her record."
-            />
-          </div>
-          <Field label="Data retention" error={form.errors.dataRetentionPolicy} className="mt-4" hint="Shown to staff and in the privacy notice.">
-            <TextInput value={form.values.dataRetentionPolicy} onValueChange={(value) => form.setField('dataRetentionPolicy', value)} placeholder="Maternal records are retained for 10 years, then anonymised." />
-          </Field>
-          <div className="mt-4 flex flex-wrap items-center gap-3">
-            <Button onClick={() => void save()} loading={form.submitting} disabled={!form.dirty} icon={<Save className="size-4" aria-hidden />}>
-              Save settings
-            </Button>
-            {form.dirty ? <span className="caption">Unsaved changes.</span> : null}
-            <Button variant="ghost" onClick={() => void settings.run()} loading={settings.loading} icon={<RefreshCw className="size-4" aria-hidden />}>
-              Reload
-            </Button>
-          </div>
-          {form.formError ? (
-            <div className="mt-3">
-              <NoticeState tone="error" title="Not saved" compact>
-                {form.formError}
-              </NoticeState>
-            </div>
-          ) : null}
-        </Card>
-      </div>
-
-      <div className="space-y-4">
-        <Card title="Clinical rule sign-off">
-          <KeyValue
-            columns={1}
-            items={[
-              { label: 'Bundled rule version', value: RULES_VERSION },
-              { label: 'Stored version', value: view.clinicalRulesVersion },
-              { label: 'Reviewed by', value: view.clinicalRulesReviewedBy || <span className="text-[var(--color-risk-amber-text)]">Not signed off</span> },
-              { label: 'Reviewed on', value: view.clinicalRulesReviewedAt ? formatDate(view.clinicalRulesReviewedAt) : '—' },
-            ]}
-          />
-          <Field label="Sign-off date" className="mt-3" hint="Recorded together with the reviewer name on the settings row.">
-            <TextInput type="date" value={form.values.clinicalRulesReviewedAt} max={toIsoDate(new Date())} onValueChange={(value) => form.setField('clinicalRulesReviewedAt', value)} />
-          </Field>
-          <Field label="Reviewed by" error={form.errors.clinicalRulesReviewedBy} className="mt-2" hint="Name and credential of the clinician who validated the thresholds.">
-            <TextInput value={form.values.clinicalRulesReviewedBy} onValueChange={(value) => form.setField('clinicalRulesReviewedBy', value)} placeholder="Dr M. Banda, MBChB, Dip Obst" />
-          </Field>
-        </Card>
-
-        <Card title="Where this is stored">
-          <NoticeState tone={providerKind === 'local' ? 'info' : 'success'} title={providerKind === 'local' ? 'Device settings row' : 'Settings collection'} compact>
-            {providerKind === 'local'
-              ? 'Settings live in this browser’s IndexedDB under the settings collection, in the same shape as the hosted database, so switching the data layer keeps every value.'
-              : 'Settings are a single document in the settings collection, readable by any signed-in account and writable only by an administrator.'}
-          </NoticeState>
-        </Card>
-      </div>
-    </div>
-  );
-}
-
-/** Renders a rule group (conditions + nested groups) as readable lines. */
-function RuleConditions({ group, depth = 0 }: { group: RuleGroup; depth?: number }) {
-  return (
-    <div className={depth > 0 ? 'ml-3 border-l border-ink-200 pl-2' : ''}>
-      <p className="micro mb-0.5">Match {group.logic === 'all' ? 'all' : 'any'} of</p>
-      <ul className="space-y-0.5 text-[0.8rem] text-ink-700">
-        {group.conditions.map((condition, index) =>
-          'logic' in condition ? (
-            <li key={index}>
-              <RuleConditions group={condition} depth={depth + 1} />
-            </li>
-          ) : (
-            <li key={index} className="tnum">
-              <span className="font-medium">{fieldLabel(condition.field)}</span> {operatorLabel(condition.op)} {String(condition.value)}
-              {condition.unit ? ` ${condition.unit}` : ''}
-            </li>
-          ),
-        )}
-      </ul>
-    </div>
-  );
-}
-
-const operatorLabel = (op: RuleOperator): string =>
-  ({ lt: 'below', lte: 'at or below', gt: 'above', gte: 'at or above', eq: 'is', neq: 'is not', in: 'is one of', includes: 'includes' })[op];
-
-function RulesSettings() {
+export default function AdminSettings() {
+  const { actor } = useSession();
   const toast = useToast();
   const confirm = useConfirm();
-  const rules = useAsync(() => listRules(), {});
-  const [editing, setEditing] = useState<RuleView | null>(null);
-  const [busyKey, setBusyKey] = useState<string | null>(null);
-  const [needsSignOff, setNeedsSignOff] = useState(false);
+
+  const [values, setValues] = useState<SettingsValues>({
+    registrationOpen: true,
+    providerApprovalsRequired: true,
+    defaultCountry: app.defaultCountry,
+    supportEmail: app.supportEmail,
+    supportPhone: app.supportPhone,
+    immunizationScheduleLabel: 'Zambia EPI routine schedule',
+    contentReviewReminderDays: 365,
+    maintenanceMessage: '',
+  });
+  const [emergencyNumbers, setEmergencyNumbers] = useState<{ label: string; number: string }[]>([]);
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [formError, setFormError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  const { data: settings, loading, error, retryable, run } = useAsync(() => settingsRepo.get(), { immediate: true });
 
   useEffect(() => {
-    setNeedsSignOff((rules.data ?? []).some((row) => row.needsSignOff));
-  }, [rules.data]);
+    document.title = 'Settings · Mama Care admin';
+    if (!settings) return;
+    setValues({
+      registrationOpen: settings.registrationOpen,
+      providerApprovalsRequired: settings.providerApprovalsRequired,
+      defaultCountry: settings.defaultCountry,
+      supportEmail: settings.supportEmail,
+      supportPhone: settings.supportPhone,
+      immunizationScheduleLabel: settings.immunizationScheduleLabel,
+      contentReviewReminderDays: settings.contentReviewReminderDays,
+      maintenanceMessage: settings.maintenanceMessage ?? '',
+    });
+    setEmergencyNumbers(
+      settings.emergencyNumbers.length > 0
+        ? settings.emergencyNumbers
+        : EMERGENCY_CONTACTS.lines.map((line) => ({ label: line.label, number: line.number })),
+    );
+  }, [settings]);
 
-  const toggle = async (rule: RuleView, enabled: boolean) => {
-    setBusyKey(rule.id);
+  const set = <K extends keyof SettingsValues>(key: K, value: SettingsValues[K]): void => {
+    setValues((current) => ({ ...current, [key]: value }));
+    setErrors((current) => ({ ...current, [key]: '' }));
+  };
+
+  const checks = useMemo(() => environmentChecks(), []);
+  const missingOptional = checks.filter((check) => !check.present);
+
+  const save = async (): Promise<void> => {
+    setFormError(null);
+    const result = validate(settingsSchema, values);
+    if (!result.ok) {
+      setErrors(result.errors);
+      setFormError('Some settings need attention before they can be saved.');
+      return;
+    }
+    const numbers = emergencyNumbers
+      .map((line) => ({ label: line.label.trim(), number: line.number.trim() }))
+      .filter((line) => line.label && line.number);
+    setSaving(true);
     try {
-      await saveRule({ key: rule.key, enabled });
-      toast.success(enabled ? 'Rule enabled' : 'Rule disabled', `${rule.label} · the change applies to visits saved from now on.`);
-      void rules.run();
-    } catch (error) {
-      toast.error(error, 'The rule could not be changed');
+      const patch: Partial<SystemSettings> = {
+        ...result.value,
+        maintenanceMessage: result.value.maintenanceMessage.trim() || null,
+        emergencyNumbers: numbers,
+      };
+      await settingsRepo.save(patch);
+      await logAudit('settings-change', 'settings', 'global', `Saved platform settings${patch.maintenanceMessage ? ' with a maintenance notice' : ''}`);
+      toast.success('Settings saved', 'They apply to everybody on their next page load.');
+      void run();
+    } catch (cause) {
+      setFormError(cause instanceof Error ? cause.message : 'That did not save. Check the connection and try again.');
     } finally {
-      setBusyKey(null);
+      setSaving(false);
     }
   };
 
-  const reset = async () => {
+  const eraseLocal = async (): Promise<void> => {
     const ok = await confirm({
-      title: 'Restore the bundled rule set?',
-      message: 'Local edits and sign-off marks on the stored rules are replaced by the version shipped with the application. Visits already recorded keep the alerts they raised.',
-      confirmLabel: 'Restore defaults',
+      title: 'Erase all locally stored data?',
+      message:
+        'In device mode this is the whole database on this browser — accounts, records, settings and the audit log. On Firebase the cloud data survives and only the cache goes. There is no undo.',
+      confirmLabel: 'Erase everything',
       tone: 'danger',
     });
     if (!ok) return;
-    try {
-      const result = await resetRulesToDefaults();
-      toast.success('Rules restored', `${result.restored} rules reset to the shipped thresholds.`);
-      void rules.run();
-    } catch (error) {
-      toast.error(error, 'The reset failed');
-    }
+    await wipe();
+    toast.success('Local data erased', 'Reload to start again.');
   };
 
-  const columns = useMemo<Column<RuleView>[]>(
-    () => [
-      {
-        key: 'rule',
-        header: 'Rule',
-        render: (row) => (
-          <div className="min-w-0">
-            <p className="text-[0.86rem] font-semibold text-ink-900">{row.label}</p>
-            <p className="caption mt-0.5 line-clamp-2">{row.message}</p>
-          </div>
-        ),
-        sortValue: (row) => row.label,
-      },
-      {
-        key: 'criteria',
-        header: 'Triggers when',
-        render: (row) => <RuleConditions group={row.criteria} />,
-        hideBelow: 'md',
-      },
-      { key: 'level', header: 'Level', render: (row) => <Badge tone={row.level === 'RED' ? 'red' : 'amber'}>{row.level}</Badge>, hideBelow: 'sm' },
-      {
-        key: 'signoff',
-        header: 'Sign-off',
-        render: (row) => (row.approvedBy ? <p className="text-[0.8rem] text-ink-600">{row.approvedBy}<span className="block caption">{row.approvedAt ? formatDate(row.approvedAt) : ''}</span></p> : <Badge tone="amber">needs review</Badge>),
-        hideBelow: 'lg',
-      },
-      {
-        key: 'enabled',
-        header: 'Enabled',
-        render: (row) => (
-          <div className="flex items-center gap-2">
-            <Switch checked={row.enabled} onChange={(value) => void toggle(row, value)} label="" disabled={busyKey === row.id} />
-          </div>
-        ),
-        align: 'center',
-      },
-      {
-        key: 'actions',
-        header: '',
-        align: 'right',
-        render: (row) => (
-          <Button size="sm" variant="secondary" onClick={() => setEditing(row)}>
-            Edit wording
-          </Button>
-        ),
-      },
-    ],
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [busyKey, rules.data],
-  );
+  if (loading) {
+    return (
+      <StaffShell portal="Admin Dashboard">
+        <StaffPageHeader title="Platform settings" />
+        <LoadingRows rows={5} />
+      </StaffShell>
+    );
+  }
 
   return (
-    <div className="space-y-4">
-      {needsSignOff ? (
-        <NoticeState
-          tone="warning"
-          title="These thresholds are a starting point, not a validated protocol"
-          compact
-          actions={
-            <Button size="sm" variant="secondary" onClick={() => void reset()}>
-              <RotateCcw className="size-4" aria-hidden /> Restore bundled rules
-            </Button>
-          }
-        >
-          Every alert says “assessment required” rather than naming a condition, and a rule only fires on data that was actually recorded. Before this
-          deployment is used for real patients a clinician must review each threshold and record the sign-off on the rule (and on the General tab).
-        </NoticeState>
-      ) : (
-        <NoticeState tone="success" title="Every rule carries a clinical sign-off" compact>
-          The stored thresholds, wording and response actions are what the alert engine reads when a visit is saved.
-        </NoticeState>
-      )}
-
-      <Card
-        title="Alert rules"
-        description={`${(rules.data ?? []).length} rules · ${rules.data?.filter((row) => row.level === 'RED').length ?? 0} red, ${rules.data?.filter((row) => row.level === 'AMBER').length ?? 0} amber`}
-        bodyClassName="p-0"
+    <StaffShell portal="Admin Dashboard">
+      <StaffPageHeader
+        title="Platform settings"
+        description="Behaviour that applies to every account on this deployment. Changes take effect on the next page load."
         actions={
-          <Button size="sm" variant="secondary" loading={rules.loading} onClick={() => void rules.run()}>
-            <RefreshCw className="size-4" aria-hidden /> Reload
-          </Button>
+          <>
+            <Button variant="ghost" size="sm" onClick={() => void run()}>
+              Reload
+            </Button>
+            <Button variant="primary" size="sm" onClick={() => void save()} loading={saving} icon={<Save className="size-4" aria-hidden />}>
+              Save settings
+            </Button>
+          </>
         }
-      >
-        {rules.error ? (
-          <div className="p-4">
-            <ErrorState message={rules.error} onRetry={() => void rules.run()} />
+      />
+
+      {error ? <ErrorState title="Settings could not be loaded" message={error} onRetry={retryable ? run : undefined} /> : null}
+      {formError ? <p className="alert alert-error mb-4">{formError}</p> : null}
+
+      {values.maintenanceMessage.trim() ? (
+        <Card className="card-pad mb-4 border-[var(--color-risk-amber-border)] bg-[var(--color-risk-amber-soft)]">
+          <div className="flex flex-wrap items-center gap-3">
+            <Badge tone="amber">Maintenance notice staged</Badge>
+            <p className="text-sm text-ink-700">{values.maintenanceMessage}</p>
+            <span className="ml-auto text-xs text-ink-600">{settings?.maintenanceMessage ? 'already live' : 'goes live when you save'}</span>
           </div>
-        ) : rules.loading && (rules.data ?? []).length === 0 ? (
-          <div className="p-4">
-            <LoadingRows rows={6} />
+        </Card>
+      ) : null}
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Card className="card-pad">
+          <SectionHeading
+            eyebrow="Access"
+            title="Who can join, and how they are checked"
+            description="These two switches decide how open the platform is. Neither is a technical preference — both are trust decisions."
+          />
+          <div className="mt-3 space-y-3">
+            <Switch
+              label="Registration is open"
+              description={
+                values.registrationOpen
+                  ? 'Anyone can create a mother, supporter or provider account. Turn it off during an incident or a closed pilot; existing accounts keep working.'
+                  : 'New sign-ups are refused with a message pointing at the support address. Use this for a closed pilot or during an incident.'
+              }
+              checked={values.registrationOpen}
+              onChange={(checked) => set('registrationOpen', checked)}
+            />
+            <Switch
+              label="Providers must be verified before they are listed"
+              description={
+                values.providerApprovalsRequired
+                  ? 'A new clinician is held at “pending” until an administrator checks their licence. Strongly recommended: mothers choose providers from this directory.'
+                  : 'Providers are approved automatically on registration. Only sensible for a closed deployment where every clinician is already known to you.'
+              }
+              checked={values.providerApprovalsRequired}
+              onChange={(checked) => set('providerApprovalsRequired', checked)}
+            />
+            {!values.providerApprovalsRequired ? (
+              <p className="alert alert-warn flex items-start gap-2">
+                <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden />
+                With verification off, anybody who registers as a provider can appear in the public directory and be linked by a
+                pregnant woman. Turn it back on unless every account is created by you.
+              </p>
+            ) : null}
           </div>
-        ) : (rules.data ?? []).length === 0 ? (
-          <EmptyState icon={<Check className="size-5" aria-hidden />} title="No rules stored yet" description="Restore the bundled rule set to start evaluating observations." />
-        ) : (
-          <DataTable rows={rules.data ?? []} columns={columns} rowKey={(row) => row.id} dense pageSize={40} caption="Alert rules" />
-        )}
+        </Card>
+
+        <Card className="card-pad">
+          <SectionHeading eyebrow="Defaults" title="Country, language and support" description="Used for new accounts, distance sorting and the help links in the footer." />
+          <div className="mt-3 space-y-4">
+            <FieldGrid columns={2}>
+              <Field label="Default country" htmlFor="st-country" error={errors.defaultCountry}>
+                <Select
+                  id="st-country"
+                  value={values.defaultCountry}
+                  onChange={(event) => set('defaultCountry', event.target.value)}
+                  options={countryOptions()}
+                />
+              </Field>
+              <Field label="Immunization schedule label" htmlFor="st-immunization" error={errors.immunizationScheduleLabel} hint="Shown on the baby screens next to the doses.">
+                <TextInput id="st-immunization" value={values.immunizationScheduleLabel} onValueChange={(value) => set('immunizationScheduleLabel', value)} />
+              </Field>
+            </FieldGrid>
+            <FieldGrid columns={2}>
+              <Field label="Support email" htmlFor="st-email" required error={errors.supportEmail}>
+                <TextInput id="st-email" type="email" value={values.supportEmail} onValueChange={(value) => set('supportEmail', value)} />
+              </Field>
+              <Field label="Support phone" htmlFor="st-phone" error={errors.supportPhone} optional hint="Shown in the footer and on the contact page.">
+                <TextInput id="st-phone" value={values.supportPhone} onValueChange={(value) => set('supportPhone', value)} placeholder="+260…" />
+              </Field>
+            </FieldGrid>
+            <Field label="Content review window (days)" htmlFor="st-review" error={errors.contentReviewReminderDays} hint="Published articles older than this are flagged for re-checking.">
+              <NumberField label="Days" value={String(values.contentReviewReminderDays)} onValueChange={(value) => set('contentReviewReminderDays', Number(value) || 365)} min={30} max={1825} />
+            </Field>
+            <p className="text-xs text-ink-500">
+              {COUNTRIES.length} countries are selectable in the interface. Zambia is the default market: currency ZMW, dialling
+              code {app.defaultDialCode}, provinces from the built-in facility list.
+            </p>
+          </div>
+        </Card>
+
+        <Card className="card-pad">
+          <SectionHeading
+            eyebrow="Safety"
+            title="Emergency numbers"
+            description="Shown on the emergency page, in the mother app and in the public footer. These override the built-in defaults for this deployment."
+          />
+          <ul className="mt-3 space-y-2">
+            {emergencyNumbers.map((line, index) => (
+              <li key={index} className="flex flex-wrap items-end gap-2">
+                <Field label="Label" htmlFor={`em-label-${index}`} className="min-w-[12rem] flex-1">
+                  <TextInput
+                    id={`em-label-${index}`}
+                    value={line.label}
+                    onValueChange={(value) => setEmergencyNumbers((current) => current.map((item, i) => (i === index ? { ...item, label: value } : item)))}
+                    placeholder="e.g. Emergency — police, ambulance, fire"
+                  />
+                </Field>
+                <Field label="Number" htmlFor={`em-number-${index}`} className="w-32">
+                  <TextInput
+                    id={`em-number-${index}`}
+                    value={line.number}
+                    onValueChange={(value) => setEmergencyNumbers((current) => current.map((item, i) => (i === index ? { ...item, number: value } : item)))}
+                    placeholder="999"
+                  />
+                </Field>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  aria-label="Remove this number"
+                  onClick={() => setEmergencyNumbers((current) => current.filter((_, i) => i !== index))}
+                  icon={<Trash2 className="size-4" aria-hidden />}
+                />
+              </li>
+            ))}
+          </ul>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setEmergencyNumbers((current) => [...current, { label: '', number: '' }])}
+              icon={<Plus className="size-4" aria-hidden />}
+            >
+              Add a number
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setEmergencyNumbers(EMERGENCY_CONTACTS.lines.map((line) => ({ label: line.label, number: line.number })))}
+            >
+              Reset to Zambia defaults
+            </Button>
+          </div>
+          <p className="mt-3 flex items-start gap-2 text-xs text-ink-500">
+            <Phone className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+            {EMERGENCY_CONTACTS.note}
+          </p>
+        </Card>
+
+        <Card className="card-pad">
+          <SectionHeading eyebrow="Availability" title="Maintenance notice" description="When set, a banner appears across the public site and the app. Leave blank for normal operation." />
+          <Field label="Notice" htmlFor="st-maintenance" error={errors.maintenanceMessage} hint="One or two sentences. Say what is affected and when it returns.">
+            <TextArea
+              id="st-maintenance"
+              rows={3}
+              value={values.maintenanceMessage}
+              onChange={(event) => set('maintenanceMessage', event.target.value)}
+              placeholder="We are upgrading the server on Saturday between 02:00 and 06:00 CAT. Your records are safe; the app may be slow to load during that time."
+            />
+          </Field>
+          <CheckboxRow
+            checked={Boolean(values.maintenanceMessage.trim())}
+            onChange={(checked) => set('maintenanceMessage', checked ? values.maintenanceMessage : '')}
+            label="Show the notice"
+            description="Unticking clears the text, which removes the banner when you save."
+          />
+          <p className="mt-2 text-xs text-ink-500">
+            A maintenance notice does not disable the app — it warns people. Records already on this device keep working, which
+            is exactly what an offline-first service should do during an outage.
+          </p>
+        </Card>
+      </div>
+
+      <div className="mt-4 grid gap-4 lg:grid-cols-2">
+        <Card className="card-pad">
+          <SectionHeading eyebrow="Privilege" title="Administrator access" description="How the first and subsequent administrators are created." />
+          <KeyValue
+            columns={1}
+            dense
+            items={[
+              { label: 'Signed in as', value: `${actor?.displayName ?? '—'} (${actor?.role ?? '—'})` },
+              { label: 'Data provider', value: dataProvider === 'firebase' ? 'Firebase Firestore' : 'This device (IndexedDB)' },
+              { label: 'Bootstrap emails', value: app.bootstrapAdminEmails.length > 0 ? app.bootstrapAdminEmails.join(', ') : 'None configured' },
+            ]}
+          />
+          <ul className="checklist mt-3 text-sm">
+            <li>On Firebase, set the <code className="break-anywhere">role: ADMIN</code> custom claim from the console or a script, then have the person sign out and back in.</li>
+            <li>In device mode, any email in <code className="break-anywhere">VITE_BOOTSTRAP_ADMIN_EMAILS</code> can claim the first ADMIN account from the sign-in screen.</li>
+            <li>Promoting somebody from the Accounts screen works too, and is logged — but keep administrators to the people who need it.</li>
+            <li>Removing your own admin role from here is blocked on purpose, so a deployment cannot be locked out by one mistake.</li>
+          </ul>
+          <div className="mt-3">
+            <Link to="/admin/users" className="btn btn-secondary btn-sm">
+              <ShieldCheck className="size-4" aria-hidden />
+              Manage accounts and roles
+            </Link>
+          </div>
+        </Card>
+
+        <Card className="card-pad">
+          <SectionHeading eyebrow="Deployment" title="Environment and integrations" description="What is configured, and what changes when it is not." />
+          <ul className="mt-3 divide-y divide-ink-100">
+            {checks.map((check) => (
+              <li key={check.key} className="flex flex-wrap items-center justify-between gap-2 py-2">
+                <span className="min-w-0">
+                  <span className="block truncate text-sm font-medium text-ink-800 break-anywhere">{check.key}</span>
+                  <span className="block text-xs text-ink-500">{check.purpose}</span>
+                </span>
+                {check.present ? <Badge tone="green">set</Badge> : <Badge tone={check.required ? 'red' : 'amber'}>{check.required ? 'missing' : 'not set'}</Badge>}
+              </li>
+            ))}
+          </ul>
+          <p className="mt-3 text-xs text-ink-500">
+            {missingOptional.length === 0
+              ? 'Every variable is present. Values are never shown here — only whether they are set.'
+              : `${missingOptional.length} variable${missingOptional.length === 1 ? ' is' : 's are'} not set. The app falls back to this device's storage and to local image handling; nothing breaks, but data no longer syncs between devices.`}
+          </p>
+          <div className="mt-3">
+            <KeyValue
+              columns={1}
+              dense
+              items={[
+                { label: 'Firebase', value: integrations.firebase.configured ? `Connected (${integrations.firebase.projectId})` : 'Not configured' },
+                { label: 'Cloudinary', value: integrations.cloudinary.configured ? `Connected (${integrations.cloudinary.cloudName})` : 'Not configured' },
+                { label: 'Web push', value: integrations.push.configured ? 'VAPID key set' : 'Not configured' },
+                { label: 'Forced provider', value: integrations.forcedProvider ?? 'auto' },
+              ]}
+            />
+          </div>
+        </Card>
+      </div>
+
+      <Card className="card-pad mt-4 border-[var(--color-risk-red-border)]">
+        <SectionHeading eyebrow="Danger" title="Destructive actions" description="Nothing here can be undone. Read the confirmation carefully — it says exactly what will and will not be deleted." />
+        <div className="mt-3 flex flex-wrap gap-2">
+          <Button variant="outline-danger" size="sm" onClick={() => void eraseLocal()} icon={<Database className="size-4" aria-hidden />}>
+            Erase local data on this device
+          </Button>
+          <Link to="/admin/media" className="btn btn-secondary btn-sm">
+            <Wrench className="size-4" aria-hidden />
+            Media & storage tools
+          </Link>
+        </div>
+        <p className="mt-3 text-xs text-ink-500">
+          To remove a single person's data, they do it themselves from Settings → Privacy & data, which deletes their records in
+          order and then their account. That path is audited and reversible nowhere — which is why administrators do not have a
+          shortcut to it.
+        </p>
       </Card>
 
-      {editing ? (
-        <RuleEditor
-          rule={editing}
-          onClose={() => setEditing(null)}
-          onSaved={() => {
-            setEditing(null);
-            void rules.run();
-          }}
-        />
-      ) : null}
-    </div>
-  );
-}
-
-function RuleEditor({ rule, onClose, onSaved }: { rule: RuleView; onClose: () => void; onSaved: () => void }) {
-  const toast = useToast();
-  const [label, setLabel] = useState(rule.label);
-  const [message, setMessage] = useState(rule.message);
-  const [action, setAction] = useState(rule.recommendedAction);
-  const [level, setLevel] = useState<Exclude<RiskLevel, 'GREEN'>>(rule.level);
-  const [approved, setApproved] = useState(false);
-  const [approverName, setApproverName] = useState('');
-  const [note, setNote] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const save = async () => {
-    setError(null);
-    if (message.trim().length < 12) {
-      setError('The alert wording must explain what was seen and that an assessment is required.');
-      return;
-    }
-    if (approved && approverName.trim().length < 3) {
-      setError('Enter the clinician recording the sign-off.');
-      return;
-    }
-    setBusy(true);
-    try {
-      await saveRule({
-        key: rule.key,
-        label: label.trim(),
-        message: message.trim(),
-        recommendedAction: action.trim(),
-        level,
-        approve: approved ? { by: approverName.trim(), note: note.trim() || 'Reviewed from the settings screen.' } : undefined,
-      });
-      toast.success('Rule saved', `${label} · version ${rule.version + 1}`);
-      onSaved();
-    } catch (caught) {
-      const messageText = caught instanceof Error ? caught.message : 'The rule could not be saved.';
-      setError(messageText);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <Modal
-      open
-      onClose={busy ? () => undefined : onClose}
-      title={rule.label}
-      description="Wording and response guidance. Thresholds are data too, but structural changes belong in the shipped rule set so they are reviewed in version control."
-      size="lg"
-      footer={
-        <>
-          <Button variant="secondary" onClick={onClose}>
-            Cancel
-          </Button>
-          <Button loading={busy} onClick={() => void save()}>
-            Save rule
-          </Button>
-        </>
-      }
-    >
-      <div className="space-y-3">
-        <div className="rounded-lg border border-ink-200 bg-ink-50 p-3">
-          <p className="micro mb-1">Triggers when (read-only)</p>
-          <RuleConditions group={rule.criteria} />
-          <p className="caption mt-2">
-            {rule.isDefault ? 'Matches the bundled rule set.' : `Modified locally from v${rule.version}.`} Categories: {rule.category.replace(/_/g, ' ').toLowerCase()}
-          </p>
+      <Card className="card-pad mt-4 border-ink-200 bg-ink-50">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <h3 className="card-title flex items-center gap-2">
+              <Globe className="size-4 text-brand-700" aria-hidden />
+              {SITE.name}
+            </h3>
+            <p className="mt-1 text-sm text-ink-600">{SITE.tagline} · {APP_VERSION}</p>
+            <p className="mt-2 max-w-prose text-sm text-ink-600">{SITE.mission}</p>
+          </div>
+          <div className="min-w-[16rem]">
+            <KeyValue
+              columns={1}
+              dense
+              items={[
+                { label: 'Organisation', value: SITE.org.name },
+                { label: 'Support', value: `${SITE.org.email}${SITE.org.phone ? ` · ${SITE.org.phone}` : ''}` },
+                { label: 'Hours', value: SITE.org.hours },
+                { label: 'Privacy contact', value: SITE.privacyContact },
+                { label: 'Base country', value: SITE.country },
+              ]}
+            />
+          </div>
         </div>
-
-        <Field label="Label" required>
-          <TextInput value={label} onValueChange={setLabel} />
-        </Field>
-        <Field label="Alert wording shown to staff" required hint="Describe the observation and the need for assessment. Never state a diagnosis.">
-          <TextInput value={message} onValueChange={setMessage} />
-        </Field>
-        <Field label="Recommended action" required>
-          <TextInput value={action} onValueChange={setAction} />
-        </Field>
-        <Field label="Level" required>
-          <Select
-            value={level}
-            options={[
-              { value: 'RED', label: 'RED — immediate assessment' },
-              { value: 'AMBER', label: 'AMBER — review within 24 hours' },
-            ]}
-            onValueChange={(value) => setLevel(value as Exclude<RiskLevel, 'GREEN'>)}
-            placeholder={null}
-          />
-        </Field>
-
-        <div className="rounded-lg border border-ink-200 p-3">
-          <Switch checked={approved} onChange={setApproved} label="Record a clinical sign-off for this rule" description="Sets who validated the threshold and when. Until then the rule is marked as needing review." />
-          {approved ? (
-            <div className="mt-3 grid gap-3 sm:grid-cols-2">
-              <Field label="Reviewed by" required>
-                <TextInput value={approverName} onValueChange={setApproverName} placeholder="Dr M. Banda, MBChB" />
-              </Field>
-              <Field label="Note" optional>
-                <TextInput value={note} onValueChange={setNote} placeholder="Compared with the 2024 national ANC guideline." />
-              </Field>
-            </div>
-          ) : null}
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <Badge tone="green">
+            <CheckCircle2 className="size-3" aria-hidden />
+            English interface live
+          </Badge>
+          <Badge tone="neutral">Bemba, Nyanja, Tonga and Lozi are structured but not translated yet</Badge>
+          <Link to="/status" className="btn btn-ghost btn-sm">
+            <LifeBuoy className="size-4" aria-hidden />
+            Public status page
+          </Link>
         </div>
-
-        {error ? (
-          <NoticeState tone="error" title="The rule was not saved" compact>
-            {error}
-          </NoticeState>
-        ) : null}
-      </div>
-    </Modal>
+      </Card>
+    </StaffShell>
   );
 }

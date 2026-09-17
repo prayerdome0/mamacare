@@ -1,351 +1,604 @@
+/**
+ * Administrator — facility directory.
+ *
+ * The directory is the one part of Mama Care a mother may act on physically: she
+ * travels there, sometimes in labour. So the screen is built around accuracy —
+ * verification state is always visible, a phone number is treated as more important
+ * than a pin on a map, and stale entries can be deactivated without being deleted
+ * (a deleted facility breaks the history on appointments already recorded there).
+ */
+
 import { useEffect, useMemo, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
-import { Building2, Pencil, Plus, RefreshCw, Users } from 'lucide-react';
-import { AppShell } from '@/components/layout/shell';
-import { Card, StatCard } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Badge, EmptyState, ErrorState, NoticeState } from '@/components/ui/display';
-import { DataTable, type Column } from '@/components/ui/table';
-import { Field, Select, Switch, TextInput } from '@/components/ui/form';
-import { FormDialog } from '@/components/forms/form-dialog';
-import { ImageUploader, type ImageUploadResult } from '@/components/media/image-uploader';
+import {
+  Building2,
+  Download,
+  MapPin,
+  Phone,
+  Plus,
+  RefreshCw,
+  ShieldCheck,
+  Trash2,
+  Upload,
+} from 'lucide-react';
 import { useAsync } from '@/hooks';
 import { useForm } from '@/hooks/use-form';
+import { facilityRepo } from '@/services/repositories';
+import { logAudit } from '@/services/audit';
+import { useConfirm, useSession } from '@/providers/app-providers';
+import { downloadBlob, formatDate, relativeTime, toCsv, toIsoDate } from '@/lib/utils';
+import { facilitySchema, type FacilityValues } from '@/lib/validation';
+import { FACILITY_DATA_NOTE, PROVINCES, facilitySeeds, directionsUrl } from '@/config/facilities';
+import { countryOptions } from '@/config/geo';
+import { ImageUploader, type ImageUploadResult } from '@/components/media/image-uploader';
+import { FACILITY_TYPE_LABELS, type Facility, type FacilityType } from '@/types/domain';
+import { StaffPageHeader, StaffShell } from '@/components/layout/staff-shell';
+import { Button } from '@/components/ui/button';
+import { Card, SectionHeading, StatCard } from '@/components/ui/card';
+import { Badge, EmptyState, ErrorState, LoadingRows } from '@/components/ui/display';
+import { CheckboxRow, Field, FieldGrid, SearchInput, Select, Switch, TextArea, TextInput } from '@/components/ui/form';
+import { Modal } from '@/components/ui/overlay';
+import { DataTable, type Column } from '@/components/ui/table';
 import { useToast } from '@/components/ui/toast';
-import { services } from '@/services/session-store';
-import { facilitySchema } from '@/lib/validation';
-import { FACILITY_TYPES, FACILITY_TYPE_LABELS, type Facility, type FacilityType } from '@/types/domain';
-import { formatDate } from '@/lib/utils';
 
-/**
- * Facility directory. A facility is the unit of access for everything else —
- * mothers, staff, alerts and reports are all scoped by it — so creating or
- * changing one is administrator-only and audited.
- */
-export default function AdminFacilitiesPage() {
-  const [params, setParams] = useSearchParams();
+export default function AdminFacilities() {
+  const { actor } = useSession();
   const toast = useToast();
-  const facilities = useAsync(() => services().data.allFacilities(), {});
-  const roster = useAsync(() => services().data.motherRoster(null), {});
-  const staff = useAsync(() => services().data.list('users', { limit: 500 }), {});
-  const alerts = useAsync(() => services().data.list('alerts', { where: [{ field: 'status', op: '!=', value: 'RESOLVED' }], limit: 500 }), {});
-  const [editing, setEditing] = useState<Facility | 'new' | null>(null);
+  const confirm = useConfirm();
+  const [search, setSearch] = useState('');
+  const [province, setProvince] = useState('ALL');
+  const [type, setType] = useState<FacilityType | 'ALL'>('ALL');
+  const [editing, setEditing] = useState<Facility | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [busy, setBusy] = useState(false);
 
-  const focus = params.get('focus');
+  const { data: facilities, loading, error, retryable, run } = useAsync(() => facilityRepo.list(), { immediate: true });
+  const rows = useMemo<Facility[]>(() => facilities ?? [], [facilities]);
+
+  const filtered = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    return rows.filter((facility) => {
+      if (province !== 'ALL' && facility.province !== province) return false;
+      if (type !== 'ALL' && facility.type !== type) return false;
+      if (!term) return true;
+      return [facility.name, facility.city, facility.address, facility.phone ?? '', facility.services.join(' ')]
+        .join(' ')
+        .toLowerCase()
+        .includes(term);
+    });
+  }, [rows, search, province, type]);
+
+  const counts = useMemo(
+    () => ({
+      total: rows.length,
+      verified: rows.filter((facility) => facility.verified).length,
+      inactive: rows.filter((facility) => !facility.active).length,
+      maternity: rows.filter((facility) => facility.hasMaternity).length,
+      emergency: rows.filter((facility) => facility.has24HourEmergency).length,
+      noPhone: rows.filter((facility) => !facility.phone && !facility.emergencyPhone).length,
+      stale: rows.filter((facility) => (Date.now() - new Date(facility.updatedAt ?? facility.createdAt ?? Date.now()).getTime()) / 86_400_000 > 365).length,
+    }),
+    [rows],
+  );
+
   useEffect(() => {
-    if (!focus) return;
-    const match = (facilities.data ?? []).find((row) => row.id === focus);
-    if (match) setEditing(match);
-    const next = new URLSearchParams(params);
-    next.delete('focus');
-    setParams(next, { replace: true });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [focus, facilities.data]);
+    document.title = 'Facilities · Mama Care admin';
+  }, []);
 
-  const stats = useMemo(() => {
-    const mothers = new Map<string, number>();
-    for (const mother of roster.data ?? []) {
-      const key = mother.careFacilityId || mother.registrationFacilityId;
-      mothers.set(key, (mothers.get(key) ?? 0) + 1);
+  const importSeeds = async (): Promise<void> => {
+    const ok = await confirm({
+      title: 'Import the built-in Zambia directory?',
+      message:
+        'Ships around forty government and mission facilities with coordinates and maternal services. Existing records are left alone — only missing ones are added, and they arrive unverified so you can check them.',
+      confirmLabel: 'Import missing facilities',
+    });
+    if (!ok) return;
+    setBusy(true);
+    try {
+      const seeds = facilitySeeds('ZM');
+      const existing = new Set(rows.map((facility) => facility.id));
+      let added = 0;
+      for (const seed of seeds) {
+        if (existing.has(seed.id)) continue;
+        const { id: _id, createdAt: _c, updatedAt: _u, ...payload } = seed;
+        await facilityRepo.create(payload as Omit<Facility, 'id' | 'createdAt' | 'updatedAt'>);
+        added += 1;
+      }
+      await logAudit('record-create', 'facilities', null, `Imported ${added} built-in facilities`);
+      toast.success(added > 0 ? `${added} facilities imported` : 'Nothing to import', added > 0 ? 'They are unverified until you check them.' : 'The built-in list is already present.');
+      void run();
+    } catch (cause) {
+      toast.error('Import failed', cause instanceof Error ? cause.message : undefined);
+    } finally {
+      setBusy(false);
     }
-    const workers = new Map<string, number>();
-    for (const user of staff.data?.rows ?? []) {
-      if (!user.facilityId || user.accountKind === 'PATIENT') continue;
-      workers.set(user.facilityId, (workers.get(user.facilityId) ?? 0) + 1);
+  };
+
+  const exportCsv = async (): Promise<void> => {
+    const csv = toCsv(
+      ['Name', 'Type', 'City', 'Province', 'Address', 'Phone', 'Emergency phone', 'Hours', 'Maternity', '24h emergency', 'Verified', 'Active', 'Latitude', 'Longitude'],
+      filtered.map((facility) => [
+        facility.name,
+        FACILITY_TYPE_LABELS[facility.type],
+        facility.city,
+        facility.province,
+        facility.address,
+        facility.phone ?? '',
+        facility.emergencyPhone ?? '',
+        facility.openingHours,
+        facility.hasMaternity ? 'yes' : 'no',
+        facility.has24HourEmergency ? 'yes' : 'no',
+        facility.verified ? 'yes' : 'no',
+        facility.active ? 'yes' : 'no',
+        facility.latitude ?? '',
+        facility.longitude ?? '',
+      ]),
+    );
+    downloadBlob(new Blob([csv], { type: 'text/csv;charset=utf-8' }), `mamacare-facilities-${toIsoDate(new Date())}.csv`);
+    await logAudit('data-export', 'facilities', actor?.uid ?? null, `Exported ${filtered.length} facilities`);
+    toast.success('Export ready', 'Facility data is public information, so this file is safe to share with partners.');
+  };
+
+  const verify = async (facility: Facility): Promise<void> => {
+    setBusy(true);
+    try {
+      await facilityRepo.verify(facility.id, actor?.displayName ?? 'Administrator');
+      await logAudit('record-update', 'facilities', facility.id, `Verified ${facility.name}`);
+      toast.success('Facility verified', 'Mothers no longer see the “not yet verified” caution on this entry.');
+      void run();
+    } finally {
+      setBusy(false);
     }
-    const openAlerts = new Map<string, number>();
-    for (const alert of alerts.data?.rows ?? []) {
-      openAlerts.set(alert.facilityId, (openAlerts.get(alert.facilityId) ?? 0) + 1);
+  };
+
+  const toggleActive = async (facility: Facility): Promise<void> => {
+    const next = !facility.active;
+    if (!next) {
+      const ok = await confirm({
+        title: `Deactivate ${facility.name}?`,
+        message:
+          'It disappears from the directory and from search, but appointments already recorded against it keep its name. Use this for a closed or renamed facility.',
+        confirmLabel: 'Deactivate',
+      });
+      if (!ok) return;
     }
-    return { mothers, workers, openAlerts };
-  }, [roster.data, staff.data, alerts.data]);
+    await facilityRepo.update(facility.id, { active: next, verified: next ? facility.verified : false });
+    await logAudit('record-update', 'facilities', facility.id, next ? `Reactivated ${facility.name}` : `Deactivated ${facility.name}`);
+    toast.success(next ? 'Facility reactivated' : 'Facility deactivated');
+    void run();
+  };
+
+  const remove = async (facility: Facility): Promise<void> => {
+    const ok = await confirm({
+      title: `Delete ${facility.name}?`,
+      message:
+        'Deleting removes the record permanently. Appointments and provider profiles that reference it keep the name as text, but directions and opening hours are gone. Deactivating is usually the better choice.',
+      confirmLabel: 'Delete facility',
+      tone: 'danger',
+    });
+    if (!ok) return;
+    await facilityRepo.remove(facility.id);
+    await logAudit('record-delete', 'facilities', facility.id, `Deleted ${facility.name}`);
+    toast.success('Facility deleted');
+    void run();
+  };
 
   const columns: Column<Facility>[] = [
     {
-      key: 'facility',
+      key: 'name',
       header: 'Facility',
-      render: (row) => (
-        <div className="flex items-start gap-2.5">
-          {row.imageUrl ? (
-            <img src={row.imageUrl} alt="" className="size-11 shrink-0 rounded-lg object-cover ring-1 ring-ink-200" loading="lazy" />
-          ) : (
-            <span className="grid size-11 shrink-0 place-items-center rounded-lg bg-ink-100 text-ink-400" aria-hidden>
-              <Building2 className="size-4" />
-            </span>
-          )}
-          <div className="min-w-0">
-            <p className="truncate text-[0.88rem] font-semibold text-ink-900">{row.name}</p>
-            <p className="caption mt-0.5">
-              {row.code} · {FACILITY_TYPE_LABELS[row.type]} · {row.district}, {row.province}
-            </p>
-          </div>
-        </div>
-      ),
       sortValue: (row) => row.name,
-    },
-    {
-      key: 'capacity',
-      header: 'Capacity',
       render: (row) => (
-        <div className="flex flex-wrap gap-1">
-          <Badge tone={row.hasMaternityWard ? 'brand' : 'neutral'}>maternity</Badge>
-          <Badge tone={row.hasUltrasound ? 'brand' : 'neutral'}>ultrasound</Badge>
-          <Badge tone={row.hasLaboratory ? 'brand' : 'neutral'}>lab</Badge>
-          {row.bedCount ? <Badge tone="neutral">{row.bedCount} beds</Badge> : null}
-        </div>
-      ),
-      hideBelow: 'md',
-    },
-    {
-      key: 'referral',
-      header: 'Refers onward to',
-      render: (row) => {
-        const target = (facilities.data ?? []).find((candidate) => candidate.id === row.referralToFacilityId);
-        return <span className="text-[0.84rem] text-ink-700">{target?.name ?? 'Not set'}</span>;
-      },
-      hideBelow: 'lg',
-    },
-    {
-      key: 'volume',
-      header: 'Mothers / staff / open alerts',
-      render: (row) => (
-        <span className="tnum text-[0.84rem] text-ink-700">
-          {stats.mothers.get(row.id) ?? 0} · {stats.workers.get(row.id) ?? 0} ·{' '}
-          <span className={(stats.openAlerts.get(row.id) ?? 0) > 0 ? 'font-semibold text-[var(--color-risk-red-text)]' : ''}>{stats.openAlerts.get(row.id) ?? 0}</span>
+        <span className="min-w-0">
+          <span className="flex flex-wrap items-center gap-2">
+            <span className="truncate text-sm font-medium text-ink-800">{row.name}</span>
+            {row.verified ? <Badge tone="green">Verified</Badge> : <Badge tone="amber">Not verified</Badge>}
+            {!row.active ? <Badge tone="neutral">Inactive</Badge> : null}
+          </span>
+          <span className="mt-0.5 block truncate text-xs text-ink-500">
+            {FACILITY_TYPE_LABELS[row.type]} · {row.city}, {row.province}
+          </span>
         </span>
       ),
-      hideBelow: 'sm',
     },
     {
-      key: 'status',
-      header: 'Status',
+      key: 'services',
+      header: 'Maternal services',
+      hideBelow: 'lg',
       render: (row) => (
-        <div className="space-y-1">
-          <Badge tone={row.active ? 'green' : 'amber'}>{row.active ? 'Active' : 'Inactive'}</Badge>
-          <p className="caption">updated {formatDate(row.updatedAt)}</p>
-        </div>
+        <span className="flex flex-wrap gap-1">
+          {row.hasMaternity ? <Badge tone="brand">Maternity</Badge> : null}
+          {row.has24HourEmergency ? <Badge tone="red">24h emergency</Badge> : null}
+          {row.maternalServices.slice(0, 2).map((service) => (
+            <Badge key={service} tone="neutral">{service}</Badge>
+          ))}
+          {row.maternalServices.length > 2 ? <span className="text-xs text-ink-500">+{row.maternalServices.length - 2}</span> : null}
+        </span>
       ),
+    },
+    {
+      key: 'contact',
+      header: 'Contact',
+      hideBelow: 'md',
+      render: (row) =>
+        row.phone || row.emergencyPhone ? (
+          <span className="block text-xs text-ink-700 tnum">
+            {row.phone ?? '—'}
+            {row.emergencyPhone ? <span className="block text-ink-500">Emergency {row.emergencyPhone}</span> : null}
+          </span>
+        ) : (
+          <Badge tone="red">No phone</Badge>
+        ),
+    },
+    {
+      key: 'updated',
+      header: 'Last checked',
+      hideBelow: 'lg',
+      sortValue: (row) => row.updatedAt ?? row.createdAt ?? '',
+      render: (row) => <span className="text-xs text-ink-600">{relativeTime(row.updatedAt ?? row.createdAt)}</span>,
     },
     {
       key: 'actions',
       header: '',
       align: 'right',
+      width: '16rem',
       render: (row) => (
-        <Button size="sm" variant="secondary" onClick={() => setEditing(row)} icon={<Pencil className="size-3.5" aria-hidden />}>
-          Edit
-        </Button>
+        <div className="actions-wrap justify-end">
+          {!row.verified ? (
+            <Button variant="primary" size="sm" onClick={() => void verify(row)} icon={<ShieldCheck className="size-4" aria-hidden />}>
+              Verify
+            </Button>
+          ) : null}
+          <Button variant="secondary" size="sm" onClick={() => { setEditing(row); setCreating(false); }}>
+            Edit
+          </Button>
+          <Button variant="ghost" size="sm" onClick={() => void toggleActive(row)}>
+            {row.active ? 'Deactivate' : 'Activate'}
+          </Button>
+          <Button variant="ghost" size="sm" onClick={() => void remove(row)} aria-label={`Delete ${row.name}`} icon={<Trash2 className="size-4" aria-hidden />} />
+        </div>
       ),
     },
   ];
 
-  const totalMothers = (facilities.data ?? []).reduce((sum, row) => sum + (stats.mothers.get(row.id) ?? 0), 0);
-
   return (
-    <AppShell
-      title="Facilities"
-      subtitle={`${(facilities.data ?? []).length} facilities · ${totalMothers} mothers enrolled`}
-      actions={
-        <>
-          <Button
-            size="sm"
-            variant="secondary"
-            loading={facilities.loading}
-            onClick={() => {
-              void facilities.run();
-              void roster.run();
-              void staff.run();
-              void alerts.run();
-            }}
-            icon={<RefreshCw className="size-4" aria-hidden />}
-          >
-            Refresh
-          </Button>
-          <Button size="sm" onClick={() => setEditing('new')} icon={<Plus className="size-4" aria-hidden />}>
-            Add facility
-          </Button>
-        </>
-      }
-    >
-      {facilities.error ? <div className="mb-4"><ErrorState message={facilities.error} onRetry={() => void facilities.run()} /></div> : null}
+    <StaffShell portal="Admin Dashboard">
+      <StaffPageHeader
+        title="Facility directory"
+        description="Clinics, health posts, maternity homes and hospitals mothers can find, filter and travel to."
+        actions={
+          <>
+            <Button variant="ghost" size="sm" onClick={() => void run()} icon={<RefreshCw className="size-4" aria-hidden />}>
+              Refresh
+            </Button>
+            <Button variant="secondary" size="sm" onClick={() => void exportCsv()} disabled={filtered.length === 0} icon={<Download className="size-4" aria-hidden />}>
+              Export
+            </Button>
+            <Button variant="secondary" size="sm" onClick={() => void importSeeds()} loading={busy} icon={<Upload className="size-4" aria-hidden />}>
+              Import built-ins
+            </Button>
+            <Button variant="primary" size="sm" onClick={() => { setCreating(true); setEditing(null); }} icon={<Plus className="size-4" aria-hidden />}>
+              Add facility
+            </Button>
+          </>
+        }
+      />
 
-      <div className="mb-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <StatCard label="Facilities" value={(facilities.data ?? []).length} hint="Configured in this deployment" loading={facilities.loading} icon={<Building2 className="size-4" aria-hidden />} />
-        <StatCard label="Active" value={(facilities.data ?? []).filter((row) => row.active).length} hint="Available for registration and referral" />
-        <StatCard label="With maternity ward" value={(facilities.data ?? []).filter((row) => row.hasMaternityWard).length} hint="Can receive labour referrals" />
-        <StatCard label="With ultrasound" value={(facilities.data ?? []).filter((row) => row.hasUltrasound).length} hint="Dating and growth scans" />
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <StatCard label="Facilities" value={counts.total} icon={<Building2 className="size-4" aria-hidden />} />
+        <StatCard label="Verified" value={counts.verified} icon={<ShieldCheck className="size-4" aria-hidden />} tone={counts.verified === counts.total ? 'green' : 'amber'} hint={`${counts.total - counts.verified} to check`} />
+        <StatCard label="With maternity" value={counts.maternity} icon={<MapPin className="size-4" aria-hidden />} tone="brand" hint={`${counts.emergency} have 24h emergency`} />
+        <StatCard
+          label="Data problems"
+          value={counts.noPhone + counts.inactive + counts.stale}
+          icon={<Phone className="size-4" aria-hidden />}
+          tone={counts.noPhone > 0 ? 'red' : 'default'}
+          hint={`${counts.noPhone} no phone · ${counts.stale} over a year old · ${counts.inactive} inactive`}
+        />
       </div>
 
-      <Card bodyClassName="p-0">
-        {(facilities.data ?? []).length === 0 && !facilities.loading ? (
-          <EmptyState
-            icon={<Users className="size-5" aria-hidden />}
-            title="No facilities yet"
-            description="Add each hospital, health centre or clinic in the catchment. Midwives and CHWs are then assigned to one, and every list is scoped by facility."
-            action={
-              <Button onClick={() => setEditing('new')}>
-                Add the first facility
-              </Button>
-            }
-          />
-        ) : (
-          <DataTable rows={facilities.data ?? []} columns={columns} rowKey={(row) => row.id} loading={facilities.loading} dense pageSize={20} caption="Facilities" />
-        )}
+      <Card className="card-pad mt-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <SearchInput value={search} onValueChange={setSearch} placeholder="Search name, city, address or service" className="w-full sm:max-w-sm" />
+          <div className="flex flex-wrap items-center gap-3">
+            <Select
+              aria-label="Filter by province"
+              value={province}
+              onChange={(event) => setProvince(event.target.value)}
+              options={[{ value: 'ALL', label: 'All provinces' }, ...PROVINCES.map((name) => ({ value: name, label: name }))]}
+              className="w-auto min-w-[10rem]"
+            />
+            <Select
+              aria-label="Filter by facility type"
+              value={type}
+              onChange={(event) => setType(event.target.value as FacilityType | 'ALL')}
+              options={[
+                { value: 'ALL', label: 'All types' },
+                ...(Object.keys(FACILITY_TYPE_LABELS) as FacilityType[]).map((value) => ({ value, label: FACILITY_TYPE_LABELS[value] })),
+              ]}
+              className="w-auto min-w-[11rem]"
+            />
+          </div>
+        </div>
       </Card>
 
-      <div className="mt-4">
-        <NoticeState tone="info" title="What a facility controls" compact>
-          Registration and care scope for mothers, the pool of staff that may read those records, the default referral destination, and which supervisors see
-          which reports. Deactivating a facility hides it from new registrations; existing records keep their history.
-        </NoticeState>
+      <Card className="card-pad mt-4">
+        {error ? <ErrorState title="Facilities could not be loaded" message={error} onRetry={retryable ? run : undefined} /> : null}
+        {loading ? <LoadingRows rows={5} /> : null}
+        {!loading && !error ? (
+          <DataTable
+            rows={filtered}
+            columns={columns}
+            rowKey={(row) => row.id}
+            caption="Facility directory entries"
+            pageSize={20}
+            emptyTitle={rows.length === 0 ? 'The directory is empty' : 'No facilities match'}
+            emptyDescription={
+              rows.length === 0
+                ? 'Import the built-in Zambia list to start, then verify and correct each entry as you confirm it by phone.'
+                : 'Try another province or type, or clear the search.'
+            }
+            emptyAction={
+              rows.length === 0 ? (
+                <Button variant="primary" size="sm" onClick={() => void importSeeds()}>
+                  Import built-in facilities
+                </Button>
+              ) : undefined
+            }
+          />
+        ) : null}
+      </Card>
+
+      <div className="mt-4 grid gap-4 lg:grid-cols-2">
+        <Card className="card-pad">
+          <SectionHeading eyebrow="Accuracy" title="How this directory is used" />
+          <p className="mt-2 text-sm text-ink-600">{FACILITY_DATA_NOTE}</p>
+          <ul className="checklist mt-3 text-sm">
+            <li>A phone number matters more than coordinates — a mother calls before she travels.</li>
+            <li>Mark 24-hour emergency only when it is true overnight, not just during clinic hours.</li>
+            <li>Deactivate rather than delete when a facility closes or is renamed.</li>
+            <li>Verification means somebody confirmed the details recently; it is not a quality rating.</li>
+          </ul>
+        </Card>
+        <Card className="card-pad">
+          <SectionHeading eyebrow="Coverage" title="Provinces represented" />
+          {rows.length === 0 ? (
+            <EmptyState className="mt-3" icon={<MapPin className="size-6" aria-hidden />} title="No facilities yet" description="Import the built-in list or add the first facility by hand." />
+          ) : (
+            <ul className="mt-3 grid gap-1.5 sm:grid-cols-2">
+              {PROVINCES.map((name) => {
+                const total = rows.filter((facility) => facility.province === name).length;
+                return (
+                  <li key={name} className="flex items-center justify-between gap-2 rounded-lg border border-ink-200 px-3 py-1.5">
+                    <span className="text-sm text-ink-700">{name}</span>
+                    <Badge tone={total === 0 ? 'red' : 'neutral'}>{total}</Badge>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+          <p className="mt-3 text-xs text-ink-500">
+            A province with no entries means a mother there sees nothing useful. Fill the gap before expanding to another
+            country.
+          </p>
+        </Card>
       </div>
 
-      {editing ? (
-        <FacilityDialog
-          facility={editing === 'new' ? null : editing}
-          others={(facilities.data ?? []).filter((row) => row.id !== (editing === 'new' ? '' : editing.id))}
-          onClose={() => setEditing(null)}
-          onSaved={() => {
-            setEditing(null);
-            void facilities.run();
-            toast.info('Facility directory refreshed');
-          }}
-        />
-      ) : null}
-    </AppShell>
+      <FacilityModal
+        open={creating || Boolean(editing)}
+        facility={editing}
+        onClose={() => { setCreating(false); setEditing(null); }}
+        onSaved={() => { setCreating(false); setEditing(null); void run(); }}
+      />
+    </StaffShell>
   );
 }
 
-function FacilityDialog({
+function FacilityModal({
+  open,
   facility,
-  others,
   onClose,
   onSaved,
 }: {
+  open: boolean;
   facility: Facility | null;
-  others: Facility[];
   onClose: () => void;
   onSaved: () => void;
 }) {
   const toast = useToast();
-  const form = useForm(facilitySchema, {
-    name: facility?.name ?? '',
-    code: facility?.code ?? '',
-    type: (facility?.type ?? 'HEALTH_CENTRE') as FacilityType,
-    district: facility?.district ?? '',
-    province: facility?.province ?? 'Lusaka Province',
-    address: facility?.address ?? '',
-    phone: facility?.phone ?? '',
-    email: facility?.email ?? '',
-    referralToFacilityId: facility?.referralToFacilityId ?? '',
-    bedCount: facility?.bedCount ?? undefined,
-    hasMaternityWard: facility?.hasMaternityWard ?? true,
-    hasUltrasound: facility?.hasUltrasound ?? false,
-    hasLaboratory: facility?.hasLaboratory ?? false,
-    active: facility?.active ?? true,
-  });
-  const [image, setImage] = useState<ImageUploadResult | null>(
-    facility?.imageUrl || facility?.imagePublicId ? { publicId: facility.imagePublicId ?? null, secureUrl: facility.imageUrl ?? null } : null,
-  );
+  const [services, setServices] = useState('');
+  const [maternalServices, setMaternalServices] = useState('');
+  const [image, setImage] = useState<ImageUploadResult | null>(null);
+  const [keepImage, setKeepImage] = useState(true);
 
-  const submit = async () => {
-    await form.submit(async (values) => {
-      try {
-        const saved = await services().data.saveFacility({
-          id: facility?.id,
-          name: values.name,
-          code: values.code,
-          type: values.type as Facility['type'],
-          district: values.district,
-          province: values.province,
-          address: values.address || null,
-          phone: values.phone || null,
-          email: values.email || null,
-          referralToFacilityId: values.referralToFacilityId || null,
-          bedCount: values.bedCount ?? null,
-          hasMaternityWard: values.hasMaternityWard,
-          hasUltrasound: values.hasUltrasound,
-          hasLaboratory: values.hasLaboratory,
-          active: values.active,
-          imageUrl: image?.secureUrl ?? facility?.imageUrl ?? null,
-          imagePublicId: image?.publicId ?? facility?.imagePublicId ?? null,
-        } as Partial<Facility> & { name: string; code: string; district: string; province: string });
-        toast.success(facility ? 'Facility updated' : 'Facility created', saved.name);
-        onSaved();
-      } catch (error) {
-        toast.error(error, 'The facility was not saved');
-        throw error;
-      }
+  const form = useForm<FacilityValues>(facilitySchema, {
+    name: '',
+    type: 'clinic',
+    address: '',
+    city: '',
+    province: 'Lusaka',
+    country: 'ZM',
+    phone: '',
+    emergencyPhone: '',
+    latitude: undefined,
+    longitude: undefined,
+    openingHours: '',
+    hasMaternity: false,
+    has24HourEmergency: false,
+    services: [],
+    maternalServices: [],
+    active: true,
+  });
+
+  useEffect(() => {
+    if (!open) return;
+    form.reset({
+      name: facility?.name ?? '',
+      type: facility?.type ?? 'clinic',
+      address: facility?.address ?? '',
+      city: facility?.city ?? '',
+      province: facility?.province ?? 'Lusaka',
+      country: facility?.country ?? 'ZM',
+      phone: facility?.phone ?? '',
+      emergencyPhone: facility?.emergencyPhone ?? '',
+      latitude: facility?.latitude ?? undefined,
+      longitude: facility?.longitude ?? undefined,
+      openingHours: facility?.openingHours ?? '',
+      hasMaternity: facility?.hasMaternity ?? false,
+      has24HourEmergency: facility?.has24HourEmergency ?? false,
+      services: facility?.services ?? [],
+      maternalServices: facility?.maternalServices ?? [],
+      active: facility?.active ?? true,
     });
+    setServices((facility?.services ?? []).join(', '));
+    setMaternalServices((facility?.maternalServices ?? []).join(', '));
+    setImage(facility?.imageUrl ? { publicId: facility.imagePublicId, secureUrl: facility.imageUrl } : null);
+    setKeepImage(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, facility]);
+
+  const submit = async (): Promise<void> => {
+    const result = await form.submit(async (values) => {
+      const payload = {
+        name: values.name,
+        type: values.type,
+        address: values.address,
+        city: values.city,
+        province: values.province,
+        country: values.country,
+        phone: values.phone?.trim() || null,
+        emergencyPhone: values.emergencyPhone?.trim() || null,
+        latitude: values.latitude ?? null,
+        longitude: values.longitude ?? null,
+        openingHours: values.openingHours,
+        hasMaternity: values.hasMaternity,
+        has24HourEmergency: values.has24HourEmergency,
+        services: services.split(',').map((item) => item.trim()).filter(Boolean),
+        maternalServices: maternalServices.split(',').map((item) => item.trim()).filter(Boolean),
+        active: values.active,
+      };
+      if (facility) {
+        await facilityRepo.update(facility.id, {
+          ...payload,
+          imageUrl: keepImage ? image?.secureUrl ?? facility.imageUrl : null,
+          imagePublicId: keepImage ? image?.publicId ?? facility.imagePublicId : null,
+        });
+        await logAudit('record-update', 'facilities', facility.id, `Edited ${payload.name}`);
+        toast.success('Facility updated');
+      } else {
+        await facilityRepo.create({
+          ...payload,
+          imageUrl: image?.secureUrl ?? null,
+          imagePublicId: image?.publicId ?? null,
+          verified: false,
+          verifiedAt: null,
+        } as Omit<Facility, 'id' | 'createdAt' | 'updatedAt'>);
+        await logAudit('record-create', 'facilities', null, `Added ${payload.name}`);
+        toast.success('Facility added', 'It shows as “not yet verified” until you confirm the details.');
+      }
+      onSaved();
+    });
+    if (!result.ok) toast.error('Check the highlighted fields');
   };
 
   return (
-    <FormDialog
-      open
+    <Modal
+      open={open}
       onClose={onClose}
-      onSubmit={() => void submit()}
-      title={facility ? `Edit ${facility.name}` : 'Add a facility'}
-      description="Facility codes are unique per deployment and appear on reports and referrals."
-      submitting={form.submitting}
-      dirty={form.dirty}
-      formError={form.formError}
-      submitLabel={facility ? 'Save facility' : 'Create facility'}
       size="lg"
+      title={facility ? `Edit ${facility.name}` : 'Add a facility'}
+      description="Mothers use these details to decide where to go, sometimes in an emergency. If you are unsure about a field, leave it out rather than guessing."
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose} disabled={form.submitting}>Cancel</Button>
+          <Button onClick={() => void submit()} loading={form.submitting}>
+            {facility ? 'Save changes' : 'Add facility'}
+          </Button>
+        </>
+      }
     >
-      <div className="space-y-3">
-        <div className="grid gap-3 sm:grid-cols-2">
-          <Field label="Facility name" error={form.errors.name} required>
-            <TextInput value={form.values.name} onValueChange={(value) => form.setField('name', value)} onBlur={() => form.blur('name')} placeholder="Chazoma Health Centre" />
+      <div className="space-y-4">
+        <FieldGrid columns={2}>
+          <Field label="Name" htmlFor="fa-name" required error={form.errors.name}>
+            <TextInput id="fa-name" value={form.values.name} onValueChange={(value) => form.setField('name', value)} onBlur={() => form.blur('name')} invalid={Boolean(form.errors.name)} placeholder="e.g. Chilenje Level 1 Hospital" />
           </Field>
-          <Field label="Code" error={form.errors.code} required hint="Uppercase, e.g. CHZ-01">
-            <TextInput value={form.values.code} onValueChange={(value) => form.setField('code', value.toUpperCase())} />
-          </Field>
-          <Field label="Type" error={form.errors.type} required>
+          <Field label="Type" htmlFor="fa-type" required error={form.errors.type}>
             <Select
+              id="fa-type"
               value={form.values.type}
-              options={FACILITY_TYPES.map((type) => ({ value: type, label: FACILITY_TYPE_LABELS[type] }))}
-              onValueChange={(value) => form.setField('type', value as FacilityType)}
-              placeholder={null}
+              onChange={(event) => form.setField('type', event.target.value as FacilityType)}
+              options={(Object.keys(FACILITY_TYPE_LABELS) as FacilityType[]).map((value) => ({ value, label: FACILITY_TYPE_LABELS[value] }))}
             />
           </Field>
-          <Field label="Onward referral to" error={form.errors.referralToFacilityId} hint="Suggested destination when this facility cannot manage the case.">
-            <Select
-              value={form.values.referralToFacilityId ?? ''}
-              options={others.map((row) => ({ value: row.id, label: `${row.name} · ${row.district}` }))}
-              onValueChange={(value) => form.setField('referralToFacilityId', value)}
-              placeholder={others.length ? 'Not set' : 'Add another facility first'}
-            />
-          </Field>
-          <Field label="District" error={form.errors.district} required>
-            <TextInput value={form.values.district} onValueChange={(value) => form.setField('district', value)} />
-          </Field>
-          <Field label="Province" error={form.errors.province} required>
-            <TextInput value={form.values.province} onValueChange={(value) => form.setField('province', value)} />
-          </Field>
-          <Field label="Address" error={form.errors.address}>
-            <TextInput value={form.values.address ?? ''} onValueChange={(value) => form.setField('address', value)} />
-          </Field>
-          <Field label="Phone" error={form.errors.phone}>
-            <TextInput value={form.values.phone ?? ''} onValueChange={(value) => form.setField('phone', value)} placeholder="+260 21 000 000" />
-          </Field>
-          <Field label="Email" error={form.errors.email}>
-            <TextInput type="email" value={form.values.email ?? ''} onValueChange={(value) => form.setField('email', value)} />
-          </Field>
-          <Field label="Maternity beds" error={form.errors.bedCount} optional hint="Used in capacity reporting only.">
-            <TextInput type="number" min={0} value={form.values.bedCount ?? ''} onValueChange={(value) => form.setField('bedCount', value === '' ? undefined : Number(value))} />
-          </Field>
-        </div>
-
-        <div className="grid gap-3 rounded-lg border border-ink-200 p-3 sm:grid-cols-2">
-          <Switch checked={form.values.hasMaternityWard} onChange={(value) => form.setField('hasMaternityWard', value)} label="Maternity ward" description="Can receive labour and delivery referrals" />
-          <Switch checked={form.values.hasUltrasound} onChange={(value) => form.setField('hasUltrasound', value)} label="Ultrasound" description="Dating scans and growth monitoring" />
-          <Switch checked={form.values.hasLaboratory} onChange={(value) => form.setField('hasLaboratory', value)} label="Laboratory" description="Haemoglobin, urine, malaria and HIV testing on site" />
-          <Switch checked={form.values.active} onChange={(value) => form.setField('active', value)} label="Active" description="Inactive facilities are hidden from new registrations" />
-        </div>
-
-        <Field label="Photograph" optional hint="Shown in the directory and on the public facility list. Stored in mamacare/facilities.">
-          <ImageUploader folder="facilities" value={image} onChange={setImage} label="Facility image" ratio="16 / 9" />
+        </FieldGrid>
+        <Field label="Address" htmlFor="fa-address" required error={form.errors.address} hint="Landmarks help more than street numbers in many towns.">
+          <TextInput id="fa-address" value={form.values.address} onValueChange={(value) => form.setField('address', value)} invalid={Boolean(form.errors.address)} />
         </Field>
+        <FieldGrid columns={3}>
+          <Field label="City or town" htmlFor="fa-city" required error={form.errors.city}>
+            <TextInput id="fa-city" value={form.values.city} onValueChange={(value) => form.setField('city', value)} invalid={Boolean(form.errors.city)} />
+          </Field>
+          <Field label="Province" htmlFor="fa-province" required error={form.errors.province}>
+            <Select
+              id="fa-province"
+              value={form.values.province}
+              onChange={(event) => form.setField('province', event.target.value)}
+              options={PROVINCES.map((name) => ({ value: name, label: name }))}
+            />
+          </Field>
+          <Field label="Country" htmlFor="fa-country" required>
+            <Select
+              id="fa-country"
+              value={form.values.country}
+              onChange={(event) => form.setField('country', event.target.value)}
+              options={countryOptions()}
+            />
+          </Field>
+        </FieldGrid>
+        <FieldGrid columns={2}>
+          <Field label="Phone" htmlFor="fa-phone" error={form.errors.phone} hint="The single most useful field in this record.">
+            <TextInput id="fa-phone" value={form.values.phone ?? ''} onValueChange={(value) => form.setField('phone', value)} placeholder="+260…" />
+          </Field>
+          <Field label="Emergency / labour ward phone" htmlFor="fa-emergency" error={form.errors.emergencyPhone}>
+            <TextInput id="fa-emergency" value={form.values.emergencyPhone ?? ''} onValueChange={(value) => form.setField('emergencyPhone', value)} placeholder="+260…" />
+          </Field>
+        </FieldGrid>
+        <Field label="Opening hours" htmlFor="fa-hours" required error={form.errors.openingHours} hint="Say what happens overnight, not just clinic hours.">
+          <TextInput id="fa-hours" value={form.values.openingHours} onValueChange={(value) => form.setField('openingHours', value)} invalid={Boolean(form.errors.openingHours)} placeholder="e.g. Outpatient 07:30–16:00; maternity and emergency 24 hours" />
+        </Field>
+        <FieldGrid columns={2}>
+          <Field label="Latitude" htmlFor="fa-lat" optional hint="Used for distance sorting only.">
+            <TextInput id="fa-lat" value={form.values.latitude === undefined ? '' : String(form.values.latitude)} onValueChange={(value) => form.setField('latitude', value === '' ? undefined : Number(value))} inputMode="decimal" />
+          </Field>
+          <Field label="Longitude" htmlFor="fa-lng" optional>
+            <TextInput id="fa-lng" value={form.values.longitude === undefined ? '' : String(form.values.longitude)} onValueChange={(value) => form.setField('longitude', value === '' ? undefined : Number(value))} inputMode="decimal" />
+          </Field>
+        </FieldGrid>
+        <Field label="General services" htmlFor="fa-services" optional hint="Comma separated.">
+          <TextInput id="fa-services" value={services} onValueChange={setServices} placeholder="Outpatient, laboratory, pharmacy, HIV testing" />
+        </Field>
+        <Field label="Maternal services" htmlFor="fa-maternal" optional hint="Comma separated — these drive the directory filters.">
+          <TextInput id="fa-maternal" value={maternalServices} onValueChange={setMaternalServices} placeholder="Antenatal clinic, delivery, postnatal check, PMTCT" />
+        </Field>
+        <div className="space-y-3 rounded-lg border border-ink-200 p-3">
+          <CheckboxRow checked={form.values.hasMaternity} onChange={(checked) => form.setField('hasMaternity', checked)} label="Has maternity services" description="Shown as a filter for mothers looking for a place to deliver." />
+          <CheckboxRow checked={form.values.has24HourEmergency} onChange={(checked) => form.setField('has24HourEmergency', checked)} label="24-hour emergency" description="Only tick this if it is genuinely staffed overnight." tone="danger" />
+          <CheckboxRow checked={form.values.active} onChange={(checked) => form.setField('active', checked)} label="Active — visible in the directory" />
+        </div>
+        <ImageUploader folder="facilities" label="Facility photo" value={image} onChange={setImage} hint="Optional. Exterior or reception only — never patients, never inside a consultation room." />
+        {facility?.imageUrl ? (
+          <Switch label="Keep the existing photo" description="Turn off to remove it when you save." checked={keepImage} onChange={setKeepImage} />
+        ) : null}
+        {form.formError ? <p className="alert alert-error">{form.formError}</p> : null}
+        {facility ? (
+          <p className="text-xs text-ink-500">
+            Added {formatDate(facility.createdAt, 'long')} · last updated {relativeTime(facility.updatedAt)} ·{' '}
+            {facility.verified ? `verified ${facility.verifiedAt ? formatDate(facility.verifiedAt, 'day') : ''}` : 'never verified'} ·{' '}
+            <a className="nav-link" href={directionsUrl(facility)} target="_blank" rel="noreferrer">
+              Open directions
+            </a>
+          </p>
+        ) : null}
       </div>
-    </FormDialog>
+    </Modal>
   );
 }

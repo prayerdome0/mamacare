@@ -1,222 +1,418 @@
 # MAMA CARE
 
-**Better Maternal Care. Connected.**
+**Every Mother. Every Journey.**
 
-A maternal-health platform for Zambian clinics: a public information site, a health-worker
-workspace (registration, ANC visits, alerts, referrals, appointments, documents, reports),
-a mother’s own portal, and an administrator console — one Firebase data layer, one access
-policy, one audit trail.
+A pregnancy, mother and baby care platform built for Zambia first and for the rest of
+Africa next. It helps a mother track her pregnancy week by week, keep antenatal
+appointments, remember medication and supplements, learn what is happening to her and
+her baby, recognise danger signs, find a facility, immunise her child on schedule, and
+continue into the postnatal period — with a clinician portal and an administration
+dashboard behind it.
 
-```
-mamacare/
-├── web/                    # React 19 + Vite + TypeScript + Tailwind v4 (the whole product)
-│   ├── src/services/       # data layer, policy, auth, media, clinical rules, reports, admin
-│   ├── src/routes/         # public site · auth · /app workspace · /admin console · /home portal
-│   ├── src/components/     # UI kit, layout shells, charts, media, clinical cards
-│   └── scripts/            # icon rasteriser (no external image tooling needed)
-├── functions/              # API service: signed uploads, custom claims, SMS/push, queue jobs
-├── firestore.rules         # the same access matrix, enforced by the database
-├── firestore.indexes.json  # composite indexes for every query the app issues
-├── firebase.json           # hosting, security rules, emulators
-└── docs/                   # architecture, credentials setup, clinical & security validation
-```
+> ### Medical-safety principle
+>
+> **Mama Care does not diagnose.** Every screen that could be mistaken for clinical
+> advice says so, in the place a person would read it rather than in a footer. The
+> platform records what a mother or her clinician enters, teaches from reviewed
+> guidance, organises appointments and reminders, and routes emergencies to a phone
+> number and a facility. Where a symptom could be dangerous, the app tells her to go
+> and be seen — it never offers a conclusion of its own.
 
 ---
 
-## Run it
+## Table of contents
+
+1. [What is in the build](#what-is-in-the-build)
+2. [Quick start](#quick-start)
+3. [Demo accounts](#demo-accounts)
+4. [Stack](#stack)
+5. [How data and permissions work](#how-data-and-permissions-work)
+6. [Media: two kinds of bytes](#media-two-kinds-of-bytes)
+7. [Notifications, reminders and push](#notifications-reminders-and-push)
+8. [Offline and device mode](#offline-and-device-mode)
+9. [Configuration](#configuration)
+10. [Route map](#route-map)
+11. [Project structure](#project-structure)
+12. [Deployment](#deployment)
+13. [Security review](#security-review)
+14. [Content provenance](#content-provenance)
+15. [Languages](#languages)
+16. [Scripts](#scripts)
+
+---
+
+## What is in the build
+
+### Public site (no account needed)
+
+Landing page, the full education library, individual articles, the facility directory
+with filters and directions, the verified provider directory, a standalone emergency
+page with Zambian short codes and the danger-sign checklist, plus About, How it works,
+FAQ, Contact, Privacy, Terms and a live Status page that reports what this deployment
+actually has configured.
+
+### Mother app — `/app`
+
+| Screen | What it does |
+| --- | --- |
+| Home | Week ring, today's reminders, next appointment, quick actions, unread notifications |
+| Pregnancy tracker | LMP or ultrasound dating, EDD, trimester, symptoms, weight/BP/fundal-height observations, kick counter, routine ANC visit plan |
+| Weekly guide | All 42 weeks: baby's development, what her body is doing, questions to ask, habits, warning signs, milestones |
+| Appointments | Book, reschedule, complete, add questions, see clinician notes, suggested next visits |
+| Reminders | Medication, supplements and custom reminders with times, frequency, refill-free scheduling and a taken/missed history |
+| Baby | Birth record, growth entries, the Zambia EPI immunization schedule with dose-by-dose tracking, safe-sleep guidance, developmental stages month by month |
+| Journal | Private notes, tagged, mood tracking, never visible to a provider or supporter |
+| Learn | Education filtered to her stage (pregnancy, labour, postnatal, newborn) |
+| Facilities | Directory with distance, maternity and 24-hour emergency filters, directions, phone |
+| Messages | Threads with her care team and her supporters |
+| Emergency | Audience-aware danger signs, "go now" card, numbers to call, what to do while waiting, and an incident record |
+| Notifications | All/unread, per-category preferences, quiet hours, push toggle |
+| Profile | Photo, care team, supporters, personal health documents, export |
+| Settings | Notification preferences, family support, password, data export and account deletion, language, storage diagnostics |
+
+Postnatal mode is not a separate app: when a pregnancy is marked delivered, the same
+shell re-orients around the baby, breastfeeding, recovery and the immunization
+schedule, and the emergency content switches to postnatal danger signs.
+
+### Healthcare provider portal — `/provider`
+
+Dashboard (today's schedule, who needs attention, unread threads), patients (only those
+with an active care link, plus pending requests), the individual record (pregnancy,
+appointments, observations, babies and immunization — read-only where it belongs to the
+mother), appointments with completion notes, an education writer with a structured block
+editor, messaging, caseload reports with CSV export, and their own professional profile
+with verification status and directory switches.
+
+### Administration — `/admin`
+
+Dashboard with a triage list, accounts (role and status), provider verification queue,
+facility directory (including importing the built-in Zambia list), article review and
+publishing, announcements, broadcast notifications, appointment oversight, content
+reports, feedback, media and storage, the audit log, and platform settings.
+
+---
+
+## Quick start
 
 ```bash
 cd web
 npm install
-npm run dev            # http://localhost:5173
+npm run dev
 ```
 
-That is the whole loop for a first look. With no cloud credentials configured the app
-runs against **this browser’s IndexedDB** through the same data-provider interface,
-policy module and alert engine that the hosted build uses — so the clinical workflow can
-be clicked through end to end without a Firebase project. It seeds a small demonstration
-dataset on first run (facilities, staff accounts, mothers, visits, alerts, referrals,
-appointments) so there is real data to interact with. Sign in with any of the seeded
-accounts listed on the administrator overview (or in `web/src/services/demo/dataset.ts`),
-password `MamaCare!2026`.
+Open the printed URL. That is the whole setup: the Firebase and Cloudinary
+configuration for this project is committed as defaults in `web/src/config/env.ts`, so
+the app boots, seeds four demo accounts and runs entirely in the browser.
 
-Opt out of the demonstration data with `VITE_LOCAL_DEMO_SEED=false`.
-
-### Switch to Firebase
+To run against your own Firebase project instead, copy `web/.env.example` to
+`web/.env.local` and fill in the values — then deploy the rules:
 
 ```bash
-cd web
-cp .env.example .env.local      # fill in VITE_FIREBASE_* from your Firebase project
-npm run dev                     # detects the keys and uses Firestore + Firebase Auth
+firebase deploy --only firestore:rules,firestore:indexes,storage
 ```
-
-No code change, no new screen: `src/config/env.ts` picks the provider, and
-`services/data/firestore-provider.ts` replaces `services/data/local/provider.ts`.
-Then deploy the rules: `firebase deploy --only firestore:rules,firestore:indexes`.
-
-> The rules are the enforcement layer, and a rules file that does not compile is not
-> deployed at all — the project silently keeps its previous rules. The rules language has
-> no loop construct, so this file expresses "did this patch touch a privileged field?"
-> with `Map.diff().affectedKeys().hasAny([…])`. `npm test` in `web/` checks the file for
-> constructs the compiler rejects, because there is no emulator in CI.
-
-### Deploying the site
-
-`web/` is a single-page application: every route must be served `index.html`, and the
-build output must actually reach the host. Two supported paths:
-
-* **Vercel** — `vercel.json` is committed (root, and again inside `web/` for a project
-  whose Root Directory is that folder), so no dashboard build settings are needed.
-* **Firebase Hosting** — `firebase.json` serves `web/dist` and rewrites `/api/**` to the
-  Cloud Run service.
-
-Both are described, with the environment variables each host needs, in
-[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — including what a Vercel `404: NOT_FOUND`,
-a blank page, or *"the database refused the profile write"* actually mean.
-
-### The API service (optional but needed for privileged work)
-
-```bash
-cd functions
-npm install
-cp .env.example .env            # Cloudinary secret, Admin credentials, SMS keys
-npm run dev                     # http://127.0.0.1:8787  (the Vite dev server proxies /api → here)
-```
-
-Without it the app still works; anything that requires a secret is **reported as
-unavailable instead of faked**: uploads fall back to device storage, and SMS reminders are
-queued with a stated reason. See [`functions/README.md`](functions/README.md).
-
-### Scripts
-
-| Where        | Command              | What it does                                              |
-| ------------ | -------------------- | --------------------------------------------------------- |
-| `web/`       | `npm run dev`         | Vite dev server (host `0.0.0.0`, port 5173, `/api` proxy) |
-| `web/`       | `npm run typecheck`   | `tsc --noEmit`, strict + `noUncheckedIndexedAccess`        |
-| `web/`       | `npm test`            | Vitest (happy-dom) unit tests                              |
-| `web/`       | `npm run build`       | typecheck then production bundle into `web/dist`           |
-| `web/`       | `npm run icons`       | regenerates PWA/app icons from `public/icons/icon.svg`     |
-| `functions/` | `npm run dev`         | API service with reload (`tsx watch`)                      |
-| `functions/` | `npm run typecheck`   | server-side typecheck                                      |
 
 ---
 
-## What is implemented
+## Demo accounts
 
-**Public site** (`/`) — thirteen pages, each its own route and its own lazy chunk. The
-landing page is the front door (hero, live platform counts, About and Services summaries,
-workflow, roles, security, FAQ, contact); the informational pages are `/about`,
-`/services`, `/how-it-works`, `/for-clinics`, `/for-mothers`, `/resources`,
-`/maternal-health`, `/emergency`, `/faq`, `/privacy`, `/contact` and `/status`. Two of them
-read real rows through the data layer rather than restating them: `/services` lists the
-facility services catalogue an administrator publishes, and `/for-clinics` lists the
-world-readable facility directory with a search; `/resources` lists the education items
-published to the signed-in reader's audience. Each degrades to a readable explanation when a
-deployment publishes nothing. This is the first screen; the sign-in page is a route like any
-other, never a landing wall. Exactly sixteen primary maternal-health images are used across
-the site through one reusable `<AppImage>` component (lazy loading, `srcSet`, blur-up
-placeholder, Cloudinary delivery with a local fallback). The landing page keeps `#about` and
-`#services` anchors so existing deep links still resolve.
+Seeded on the first run of a device-mode install (`VITE_LOCAL_DEMO_SEED=true`, the
+default). Password for all four: `mamacare123`.
 
-**Authentication** — register, sign in/out, forgot/reset password, change password,
-update profile, deactivate. Roles come from Firebase custom claims
-(`ADMIN`, `FACILITY_SUPERVISOR`, `MIDWIFE`, `NURSE`, `COMMUNITY_HEALTH_WORKER`, `MOTHER`).
-Self-registration can never request `ADMIN`; an unapproved health worker lands on a pending
-screen and every privileged read stays blocked until an administrator approves the
+| Email | Role |
+| --- | --- |
+| `demo@mamacare.health` | Mother, pregnant |
+| `baby@mamacare.health` | Mother, postnatal with a baby |
+| `provider@mamacare.health` | Healthcare provider |
+| `admin@mamacare.health` | Administrator |
+
+The demo seed only runs in device mode. On a Firebase deployment you create real
+accounts, and the first administrator is either an email listed in
+`VITE_BOOTSTRAP_ADMIN_EMAILS` or somebody given the `role: ADMIN` custom claim.
+
+---
+
+## Stack
+
+- **React 19 + TypeScript + Vite 7**, Tailwind CSS 4, React Router 7
+- **Firebase** — Authentication, Firestore, Storage, Cloud Messaging
+- **Cloudinary** — unsigned uploads for public imagery (cloud `mk2tulbt`, preset `Mamacare`)
+- **Zod** for every form and every write that crosses a boundary
+- **Vitest** for the pure logic (obstetric maths, validation, storage, geo, errors, ids)
+
+No backend service. There is no server to operate, no queue to monitor and no secret to
+rotate: the browser talks to Firebase and Cloudinary directly, and authorisation lives
+in `firestore.rules` and `storage.rules`.
+
+---
+
+## How data and permissions work
+
+Three layers, and they must agree:
+
+1. **`web/src/services/policy/policy.ts`** — the in-app decision module. Every read and
+   write through the data layer is checked here first, so the device build behaves
+   exactly like the hosted one and a denied action produces a human sentence rather than
+   a stack trace.
+2. **`firestore.rules`** — the enforcement layer. Mirrors the policy module rule for
+   rule. This is the one that matters: it stands between a crafted request and somebody
+   else's pregnancy record.
+3. **`web/src/services/data/*`** — one `DataProvider` interface with two implementations
+   (Firestore and IndexedDB). Repositories in `services/repositories.ts` are the only way
+   the UI touches data, so a screen never knows which provider it is on.
+
+Roles are `MOTHER`, `SUPPORTER`, `PROVIDER`, `FACILITY_ADMIN`, `ADMIN`. The role is read
+from the Firebase custom claim when it exists and from the profile document otherwise, in
+both the rules and the app, so a deployment works before claims are wired up. Nobody can
+promote themselves: `role`, `status` and `privilegeVersion` are not writable by their own
 account.
 
-**Health-worker workspace** (`/app`) — today’s workload dashboard; mother roster with
-search and filters; the mother profile (identity, patient ID, GA, EDD, risk status,
-actions and ten tabs: overview, identity & contact, pregnancy & history, ANC visits,
-vitals & growth, appointments, alerts, referrals, documents, reports); structured ANC
-visit entry with the 13 danger signs plus “other” and “none reported”; the alert register
-with response workflow; referral register on the nine-status workflow; appointment
-register with today/upcoming/overdue/missed views and a reminder queue; documents;
-reports; education library; notifications; own profile.
+The rules that carry the design:
 
-**Administrator console** (`/admin`) — platform overview, the approval queue, user
-directory with role/facility/status changes and session revocation, facility directory,
-system settings including the clinical rule set with per-rule sign-off, and the audit
-log with CSV export. Mother/appointment/alert/referral/document/report screens are the same
-components as `/app`, mounted in the admin scope — no second implementation.
+- **A mother owns her health data.** She can always read it, write it and delete it.
+- **A clinician reaches a patient only through an active care link.** The mother grants
+  it; the clinician may only request one, and may withdraw a request they made. Revoking
+  is immediate.
+- **The journal, personal documents, notifications and devices are excluded from every
+  sharing path.** There is no setting that exposes them.
+- **A supporter sees only the categories the mother switched on** — appointments,
+  reminders, education, milestones — individually.
+- **Publishing education is an administrator action.** Providers write drafts; a second
+  clinician publishes, and the reviewer and date are stored on the article.
+- **Everything consequential is written to an append-only audit log** with actor, role,
+  target and detail. Audit entries can be created and read by administrators, never
+  updated or deleted by anyone.
 
-**Mother’s portal** (`/home`) — her pregnancy at a glance, appointments, her own record
-(visit measurements, documents and reports shared with her), reading chosen for her stage
-and language, messages, and account settings. She only ever sees her own rows, and
-nothing clinical is interpreted for her: wording stays “your clinic would like to see you”,
-never a diagnosis.
+Two document ids are deterministic so a rule can answer *"is this clinician linked to this
+patient?"* with a single `exists()` instead of a query it cannot run:
 
-**Media** — one Cloudinary service (`web/src/services/media/`) with folder organisation
-`mamacare/{public,profiles,reports,documents,facilities,education,branding}`, validation
-before upload, real progress, secure delivery URLs, and delete. Unsigned preset for public
-imagery (browser direct); **signed** policy for patient documents, reports and portraits,
-which goes through the API service because the API secret never reaches the client. If
-Cloudinary is not configured, bytes are stored on-device under the same logical keys so
-the workflow stays testable — and the interface says so plainly.
-
-**Notifications** — in-app inbox is the source of truth; browser push (FCM) is an extra
-channel per device, requested at runtime (no token is ever hard-coded or committed); SMS
-reminders are queued through the API service to an approved provider only.
+```
+care_links/{motherUserId}__{providerUserId}
+supporters/{motherUserId}__{supporterEmail}
+```
 
 ---
 
-## Security model, in one page
+## Media: two kinds of bytes
 
-| Concern                  | Where it is enforced                                                                 |
-| ------------------------ | ----------------------------------------------------------------------------------- |
-| Who may read a row        | `firestore.rules` (database) **and** `web/src/services/policy/policy.ts` (device provider + UI) |
-| Who may write what        | same pair, evaluated on the *merged* row so an update cannot escape its scope        |
-| Roles                   | Firebase custom claims, written only by the API service with the Admin SDK          |
-| Privilege changes         | `/admin/users/role` on the API service, admin-only, reason required, audited         |
-| Patient document access   | signed, expiring delivery URLs from the API service; the record’s access list decides |
-| Secrets                 | server environment only (`functions/.env`); nothing secret in the browser bundle      |
-| Errors                  | one mapping module (`web/src/lib/errors.ts`): raw Firebase/provider errors are never shown to users |
-| Input                     | zod schemas per form and per route, shared between client and API                    |
-| Rate limiting             | API service per IP and per route group; contact form additionally honeypot + dwell   |
-| Audit                     | append-only `audit_logs`, no clinical payloads in metadata, written on every meaningful action |
+| | Public imagery | Personal health documents |
+| --- | --- | --- |
+| Examples | Education covers, facility photos, profile pictures, branding | Scans, lab results, prescriptions, birth records, child health cards |
+| Storage | Cloudinary (unsigned preset) | Firebase Storage, `mamacare/documents/{uid}/…` |
+| Access | Anyone with the URL | Owner only, plus administrators |
+| Fallback | IndexedDB blob on this device | IndexedDB blob on this device |
 
-Frontend role checks exist **only** to decide what to render. `web/src/types/domain.ts`
-and the policy module are the human-readable description of the matrix;
-`docs/SECURITY-VALIDATION.md` lists the test cases that must pass before real use.
+The split is enforced in `services/media/media-service.ts`, not left to the caller:
+`uploadImage()` can only reach the public library and `uploadDocument()` can only reach
+the sensitive folder, which is why a profile photo can never end up in a place a CDN
+caches and a scan can never end up in a place a stranger can guess. Deleting an image
+queues its public id in an orphan list (Admin → Media) because an unsigned browser upload
+cannot delete its own asset.
 
 ---
 
-## Clinical safety
+## Notifications, reminders and push
 
-* Alert rules are **data** (`alert_rules` collection, seeded from
-  `web/src/services/clinical/rules.ts`), configurable per deployment, versioned, and each
-  one carries a `approvedBy` / `approvedAt` sign-off field.
-* Alert wording is never diagnostic: “*Potential danger sign identified. Immediate
-  clinical assessment required.*” The engine reports that a recorded value matched a
-  configured threshold; it does not claim a condition.
-* The administrator settings screen shows exactly how many rules are still unsigned, and
-  refuses to look like a validated protocol while any are unreviewed.
-* **Before real clinical use, a qualified clinician must validate the thresholds,
-  wording, response times and escalation paths**, and the deployment must record that
-  review (`docs/SECURITY-VALIDATION.md`). Aggregate reporting contains no patient
-  identifiers, and a mother sees only her own data.
+- **In-app notifications** are records in Firestore/IndexedDB, listed on
+  `/app/notifications`, with per-category preferences and quiet hours the person sets.
+- **The reminder engine** (`services/reminders.ts`) collects what is due, de-duplicates
+  through an IndexedDB key so nothing fires twice, and respects quiet hours.
+- **Web push** uses Firebase Cloud Messaging with the VAPID key committed as a default.
+  `pushState()` reports honestly — `unsupported`, `unconfigured`, `default`, `denied`,
+  `granted`, `error` — and the UI says which one it is instead of pretending a toggle
+  worked.
+- **Broadcasts** (Admin → Notifications) write one notification per recipient, show the
+  count before sending, and are logged with the sender's name. They cannot be recalled.
+
+---
+
+## Offline and device mode
+
+The app is a PWA: installable, with a manifest, icons and a service worker. When Firebase
+is not configured — or when `VITE_DATA_PROVIDER=local` — everything runs in this browser's
+IndexedDB, including authentication (PBKDF2-SHA256, 150k iterations, per-account salt) and
+media (stored as blobs). That is not a degraded demo path; it is how a clinic tablet with
+no connectivity still works, and the same repositories, the same policy module and the
+same screens are used either way. Admin → Media shows the storage mode, the browser's
+estimate, whether storage is persisted, and a per-collection record count.
 
 ---
 
 ## Configuration
 
-Two `.env.example` files describe every variable, who reads it, and what happens when it
-is missing:
+Every variable is optional and documented in [`web/.env.example`](web/.env.example). The
+groups: data provider, Firebase web config, push VAPID key, Cloudinary, branding,
+support and privacy contacts, market defaults (`ZM` / `ZMW` / `+260`), emergency numbers,
+and operations (bootstrap administrator emails, demo seed).
 
-* [`web/.env.example`](web/.env.example) — public browser values (Firebase web config,
-  Cloudinary cloud name + unsigned preset, support contacts, emergency numbers,
-  provider override, VAPID key).
-* [`functions/.env.example`](functions/.env.example) — server secrets (Cloudinary API key +
-  secret, Admin SDK credential path, SMS provider, email relay, bootstrap administrator
-  allow-list, scheduler token).
+The public Status page (`/status`) and Admin → Settings both report which variables are
+present and what changes when one is missing — never their values.
 
-No service-account JSON, private key or API secret belongs in this repository, in a log
-line, or in a chat message. If a credential is missing, the integration interface is still
-complete and the interface names the variable that is missing.
+---
 
-## Documentation
+## Route map
 
-* [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — layers, data flow, provider contract, why the device provider exists.
-* [`docs/SETUP-CREDENTIALS.md`](docs/SETUP-CREDENTIALS.md) — Firebase, Cloudinary, SMS, push, first administrator, deploy.
-* [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — hosting configuration, environment variables, the role model in Firestore, and troubleshooting (404 at the edge, the interface's 500 page, refused profile writes).
-* [`docs/SECURITY-VALIDATION.md`](docs/SECURITY-VALIDATION.md) — access matrix tests, clinical rule validation checklist, go-live gate.
+```
+/                       landing                     /learn                 library
+/learn/:slug            article                     /learn/category/:name  topic
+/facilities             directory                   /providers             clinicians
+/emergency              public emergency page       /about /how-it-works /faq
+/contact /privacy /terms /status                    *                      not found
+
+/sign-in /register /forgot-password /pending /home
+
+/app                    home            /app/pregnancy      tracker
+/app/guide              weekly guide    /app/appointments   visits
+/app/reminders          medication      /app/baby           baby & immunization
+/app/journal            private notes   /app/learn          education
+/app/facilities         directory       /app/messages       care team
+/app/emergency          danger signs    /app/notifications  alerts
+/app/profile            you             /app/settings       preferences & data
+
+/provider               dashboard       /provider/patients        caseload
+/provider/patients/:id  record          /provider/appointments    visits
+/provider/education     writer          /provider/messages        threads
+/provider/reports       caseload        /provider/profile         you
+
+/admin                  dashboard       /admin/users          accounts
+/admin/providers        verification    /admin/facilities     directory
+/admin/articles         content         /admin/announcements  banners
+/admin/notifications    broadcast       /admin/appointments   oversight
+/admin/reports          content reports /admin/feedback       messages
+/admin/media            media & storage /admin/audit          log
+/admin/settings         platform
+```
+
+Guards decide where you land; policy and rules decide what you may read. A provider who
+types `/app/pregnancy` is sent to their own portal — and could not read that record from
+either URL.
+
+---
+
+## Project structure
+
+```
+web/src/
+  config/       env, weekly guide (42 weeks), immunization schedule, baby
+                development, built-in articles, Zambia facilities, site copy
+  types/        the domain model — one file, every entity and union
+  services/
+    data/       provider contract, Firestore + IndexedDB implementations,
+                query engine, local seed data
+    policy/     the permission module mirrored by firestore.rules
+    auth/       registration, profile lookup, local + Firebase adapters
+    media/      Cloudinary, Firebase Storage, blob fallback, routing, orphans
+    repositories.ts  the only way the UI reads or writes
+    session-store.ts provider selection, session, diagnostics, account deletion
+    audit.ts    append-only log
+    push.ts     FCM state machine     reminders.ts  due-item engine
+  components/   ui/ (design system), layout/ (shells), plus pregnancy,
+                emergency, facility, content and message components
+  routes/       public/ auth/ mother/ provider/ admin/ + guards
+  lib/          obstetric maths, validation schemas, date/format/csv utils,
+                storage wrappers, error taxonomy, ids — with tests
+firestore.rules  firestore.indexes.json  storage.rules  firebase.json
+```
+
+---
+
+## Deployment
+
+**Firebase Hosting** (recommended — the rules, indexes and the site deploy together):
+
+```bash
+cd web && npm ci && npm run build
+cd .. && firebase deploy
+```
+
+`firebase.json` serves `web/dist`, rewrites every path to `index.html`, caches hashed
+assets immutably, and sets `X-Content-Type-Options`, `Referrer-Policy`, `X-Frame-Options`
+and a `Permissions-Policy` that denies geolocation, microphone and camera.
+
+**Vercel** also works via the committed `vercel.json` (build in `web/`, output
+`web/dist`, SPA rewrite, the same headers).
+
+Before going live:
+
+1. Add your authorised domains in the Firebase console.
+2. Deploy `firestore.rules`, `firestore.indexes.json` and `storage.rules`.
+3. Set the `role: ADMIN` custom claim for your first administrator.
+4. Import and verify the facility directory (Admin → Facilities → Import built-ins).
+5. Review the built-in education library and publish anything you have checked locally.
+
+---
+
+## Security review
+
+Read `firestore.rules` before you deploy — it is the security model, and it is commented
+so each rule says who it is for. What is covered:
+
+- Owner-only health records; clinician access gated on an active care link; journal,
+  documents, notifications and devices excluded from every sharing path.
+- Self-service roles only at registration; `role`, `status` and `privilegeVersion` not
+  writable by their own account.
+- Providers may write drafts but cannot publish or delete content.
+- Messages are immutable apart from read state, and cannot be deleted — report instead.
+- Audit log is append-only: create for the actor, read for administrators, never update.
+- Storage rules cap upload size and content type, and scope personal documents to their
+  owner's path prefix.
+- Passwords: 10 characters minimum with a capital letter and a digit, enforced by one
+  policy object shared by the schema, the device auth adapter and the UI copy.
+- No secrets in the bundle. The Firebase web config is public by design; Cloudinary uses
+  an unsigned preset; there is no server holding a key.
+
+**One known limitation, stated plainly.** The public provider directory must be listable
+by a visitor who has not registered, and Firestore evaluates a `list` query as a whole
+rather than per document — so a crafted query against `providers` can read rows the UI
+filters out, including pending applicants and their licence numbers. Detail reads are
+still restricted, and the exposure is limited to that one collection. The fix before a
+public launch is to move `licenseNumber`, `status`, `verifiedBy`, `verifiedAt` and
+`rejectionReason` into an admin-only `providers/{id}/verification/{id}` subcollection and
+keep the directory document to what a patient should see. It is a contained change:
+`providerRepo.approve/reject` and the admin provider screen are the only writers.
+
+---
+
+## Content provenance
+
+- **42-week pregnancy guide** (`config/weekly-guide.ts`) — written against routine
+  antenatal guidance, with a warning-sign block on every week that carries one.
+- **Immunization schedule** (`config/immunization.ts`) — Zambia's EPI routine: BCG, OPV0
+  and HepB at birth; OPV/Penta/PCV/Rota at 6, 10 and 14 weeks with IPV at 14; vitamin A
+  at 6 and 9 months; MR1 at 9 months and MR2 at 18 months — plus the maternal Td schedule.
+  The label is editable in Admin → Settings so a deployment can name the schedule it
+  actually follows.
+- **22 built-in articles** (`config/articles.ts`) spanning pregnancy, nutrition, antenatal
+  care, activity, rest, wellbeing, labour, postnatal, newborn, breastfeeding and
+  immunization. They cannot be deleted; publishing your own version with the same slug
+  replaces them everywhere.
+- **~40 Zambian facilities** (`config/facilities.ts`) with coordinates, maternal services
+  and opening hours, all arriving **unverified** — an administrator confirms each by phone
+  before it is trusted.
+- **Routine ANC visit plan** — eight milestones at 12, 20, 26, 30, 34, 36, 38 and 40 weeks.
+
+Content is educational. It is not a substitute for a qualified professional, and every
+article carries the reviewer's name and a review date so stale guidance gets flagged
+instead of quietly persisting.
+
+---
+
+## Languages
+
+English is live. Bemba, Nyanja, Tonga and Lozi are structured throughout the domain model
+(`LanguageCode`, the `LANGUAGES` table, a language field on every account, article and
+notification) and selectable in the interface, where they are marked *coming soon*. Adding
+a translation is a content task, not a refactor: nothing in the data model assumes English.
+
+---
+
+## Scripts
+
+```bash
+cd web
+npm run dev         # Vite dev server (bound to all interfaces, any host allowed)
+npm run build       # typecheck, then a production build with per-route chunks
+npm run typecheck   # tsc --noEmit
+npm run test        # vitest: obstetrics, validation, storage, geo, errors, ids
+npm run preview     # serve the production build
+npm run icons       # regenerate PWA icons
+```

@@ -1,360 +1,214 @@
-import { AppError, logProviderError, toAppError } from '@/lib/errors';
-import { newId } from '@/lib/ids';
-import { app, integrations } from '@/config/env';
-import { defaultCountry } from '@/config/geo';
-import { services } from '@/services/session-store';
-import type { AuthClaims, Role, UserProfile } from '@/types/domain';
-import type { RegisterValues } from '@/lib/validation';
-
 /**
- * Account creation.
+ * Registration.
  *
- * The role a requester *asks* for is stored as `requestedRole` on a pending
- * profile; the effective role is always the least-privileged one (MOTHER for a
- * patient, and a pending health-worker record with no clinical access) until an
- * administrator approves it. There is deliberately no code path in which the
- * browser can ask for ADMIN and receive it.
+ * One flow for all three self-service account kinds, because what differs is only
+ * what gets written afterwards:
  *
- * Firestore rules allow a signed-up account to write exactly one document: its
- * own `users/{uid}` row, with a non-privileged `role` and a `status` of
- * `PENDING_APPROVAL` or `ACTIVE`. `privilegeVersion` is server-managed and must
- * not appear on that first write — including it made every registration fail
- * with a permission error after the authentication account had already been
- * created, which is why the document is now built field by field rather than by
- * copying the whole profile object.
+ *  • MOTHER     → profile (+ an optional pregnancy so the tracker works on day one)
+ *  • SUPPORTER  → profile with `supportsUserId` resolved from the invited email
+ *  • PROVIDER   → profile + a directory record that stays `pending` until an
+ *                 administrator verifies it
+ *
+ * Nobody may self-assign ADMIN or FACILITY_ADMIN. The first administrator on a
+ * fresh install comes from `VITE_BOOTSTRAP_ADMIN_EMAILS`, and after that only an
+ * existing administrator can grant a privileged role.
  */
 
-const DEFAULT_ROLE_FOR_SELF_REGISTRATION: Role = 'MOTHER';
+import { z } from 'zod';
+import { passwordPolicy } from '@/lib/validation';
+import { AppError } from '@/lib/errors';
+import { slugify } from '@/lib/ids';
+import { defaultProfile } from '@/services/auth/profile-lookup';
+import { localAuth } from '@/services/auth/local-auth';
+import { firebaseAuth } from '@/services/auth/firebase-auth';
+import { services } from '@/services/session-store';
+import { logAudit } from '@/services/audit';
+import { COUNTRIES } from '@/config/geo';
+import type { Actor } from '@/services/data/contract';
+import { DEFAULT_NOTIFICATION_PREFS } from '@/types/domain';
+import type { HealthcareProvider, LanguageCode, Profession, Role, UserProfile } from '@/types/domain';
 
-/** Fields the client is allowed to write on its own first document. */
-interface SelfProfileDocument {
-  id: string;
-  email: string;
-  fullName: string;
-  phone: string | null;
-  role: Role;
-  status: 'ACTIVE' | 'PENDING_APPROVAL';
-  accountKind: 'HEALTH_WORKER' | 'PATIENT';
-  requestedRole: Role | null;
-  facilityId: string | null;
-  motherId: string | null;
-  title: string | null;
-  licenseNumber: null;
-  photoUrl: null;
-  photoPublicId: null;
-  emailVerified: boolean;
-  country: string;
-  preferredLanguage: string;
-  pushEnabled: boolean;
-  createdAt: string;
-  createdBy: string;
-  updatedAt: string;
-  updatedBy: null;
-  lastLoginAt: string;
-  deactivatedAt: null;
-  deactivatedBy: null;
-  deactivationReason: null;
-}
+export const SELF_SERVICE_ROLES: Role[] = ['MOTHER', 'SUPPORTER', 'PROVIDER'];
 
-export interface RegistrationResult {
-  uid: string;
-  needsApproval: boolean;
-  email: string;
-}
-
-export async function registerAccount(values: RegisterValues): Promise<RegistrationResult> {
-  const registry = services();
-  const email = values.email.trim().toLowerCase();
-  const isHealthWorker = values.accountKind === 'HEALTH_WORKER';
-  const country = (values.country || defaultCountry.code).toUpperCase();
-
-  const claims: AuthClaims = {
-    role: DEFAULT_ROLE_FOR_SELF_REGISTRATION,
-    facilityId: values.facilityId || null,
-    accountStatus: isHealthWorker ? 'PENDING_APPROVAL' : 'ACTIVE',
-    motherId: null,
-  };
-
-  let uid: string;
-  try {
-    const created = await registry.auth.register({
-      fullName: values.fullName.trim(),
-      email,
-      phone: values.phone,
-      password: values.password,
-      claims,
-    });
-    uid = created.uid;
-  } catch (error) {
-    throw toAppError(error, 'Unable to create your account. Please try again.');
-  }
-
-  const document = buildSelfProfileDocument({
-    uid,
-    profile: {
-      fullName: values.fullName.trim(),
-      email,
-      phone: values.phone,
-      facilityId: values.facilityId || null,
-      isHealthWorker,
-      requestedRole: isHealthWorker ? (values.requestedRole ?? 'COMMUNITY_HEALTH_WORKER') : null,
-      title: values.jobTitle || null,
-      country,
-      preferredLanguage: values.preferredLanguage || 'English',
-    },
+export const registrationSchema = z
+  .object({
+    fullName: z.string().trim().min(2, 'Enter your full name').max(120),
+    email: z.string().trim().toLowerCase().email('Enter a valid email address'),
+    password: z.string().min(passwordPolicy.minLength, passwordPolicy.message).max(128),
+    confirmPassword: z.string(),
+    phone: z.string().trim().max(32).optional().or(z.literal('')),
+    dateOfBirth: z.string().trim().optional().or(z.literal('')),
+    country: z.string().min(2),
+    language: z.enum(['en', 'bem', 'ny', 'toi', 'loz']),
+    role: z.enum(['MOTHER', 'SUPPORTER', 'PROVIDER']),
+    emergencyName: z.string().trim().optional().or(z.literal('')),
+    emergencyPhone: z.string().trim().optional().or(z.literal('')),
+    emergencyRelationship: z.string().trim().optional().or(z.literal('')),
+    // supporter
+    supportsEmail: z.string().trim().optional().or(z.literal('')),
+    // provider
+    profession: z
+      .enum(['midwife', 'nurse', 'doctor', 'maternal-educator', 'community-health-worker', 'pharmacist'])
+      .optional(),
+    title: z.string().trim().optional().or(z.literal('')),
+    licenseNumber: z.string().trim().optional().or(z.literal('')),
+    facilityId: z.string().trim().optional().or(z.literal('')),
+    facilityName: z.string().trim().optional().or(z.literal('')),
+    consent: z.boolean(),
+  })
+  .refine((input) => input.password === input.confirmPassword, {
+    message: 'The two passwords do not match',
+    path: ['confirmPassword'],
+  })
+  .refine((input) => input.consent === true, {
+    message: 'You must agree before creating an account',
+    path: ['consent'],
   });
 
-  try {
-    await persistSelfProfile(uid, document, registry.provider.kind);
-  } catch (error) {
-    // The authentication account exists but its profile could not be written.
-    // Leaving it behind would make the email "already registered" on the next
-    // attempt, so the half-created account is removed before the error is shown.
-    await rollbackHalfCreatedAccount(uid);
-    logProviderError('registration profile write', error);
-    const mapped = toAppError(error, 'Unable to create your account. Please try again.');
-    throw new AppError(
-      mapped.code === 'FORBIDDEN'
-        ? 'Your account could not be set up because the database refused the profile write. This is a deployment problem (security rules), not something you did — please tell your platform administrator.'
-        : mapped.message,
-      mapped.code,
-      { retryable: mapped.retryable },
-    );
+export type RegistrationInput = z.input<typeof registrationSchema>;
+
+/** Field-level errors, so the form can show them next to the right input. */
+export function validationErrors(input: unknown): Record<string, string> {
+  const result = registrationSchema.safeParse(input);
+  if (result.success) return {};
+  const errors: Record<string, string> = {};
+  for (const issue of result.error.issues) {
+    const key = String(issue.path[0] ?? 'form');
+    if (!errors[key]) errors[key] = issue.message;
   }
-
-  await registry.data
-    .audit('user.created', 'user', uid, {
-      label: email,
-      facilityId: document.facilityId,
-      metadata: {
-        accountKind: document.accountKind,
-        requestedRole: document.requestedRole ?? 'n/a',
-        approvalRequired: isHealthWorker,
-        country,
-      },
-    })
-    .catch(() => null);
-
-  if (isHealthWorker && document.facilityId) {
-    await registry.data
-      .notifyFacilityTeam(document.facilityId, {
-        userId: '',
-        kind: 'ACCOUNT',
-        title: 'New health worker awaiting approval',
-        body: `${document.fullName} registered as ${document.requestedRole?.replace(/_/g, ' ').toLowerCase()} and needs an administrator to confirm access.`,
-        level: 'info',
-        link: '/admin/users',
-        facilityId: document.facilityId,
-      })
-      .catch(() => 0);
-  }
-
-  return { uid, needsApproval: isHealthWorker, email };
+  return errors;
 }
 
-/** The exact document the security rules accept for a self-registered account. */
-export function buildSelfProfileDocument(input: {
-  uid: string;
-  profile: {
-    fullName: string;
-    email: string;
-    phone: string | null;
-    facilityId: string | null;
-    isHealthWorker: boolean;
-    requestedRole: Role | null;
-    title: string | null;
-    country: string;
-    preferredLanguage: string;
-    /** Set only for a login created by staff for an existing mother record. */
-    motherId?: string | null;
+export interface RegisterOptions {
+  /** Pregnancy details captured on the same screen (mothers only). */
+  pregnancy?: {
+    lmpDate: string | null;
+    eddDate: string | null;
+    datingMethod: 'lmp' | 'ultrasound' | 'clinician' | 'unknown';
+    previousPregnancies: number;
+    previousLiveBirths: number;
   };
-}): SelfProfileDocument {
-  const now = new Date().toISOString();
-  const { uid, profile } = input;
-  return {
-    id: uid,
-    email: profile.email,
-    fullName: profile.fullName,
-    phone: profile.phone ?? null,
-    role: DEFAULT_ROLE_FOR_SELF_REGISTRATION,
-    status: profile.isHealthWorker ? 'PENDING_APPROVAL' : 'ACTIVE',
-    accountKind: profile.isHealthWorker ? 'HEALTH_WORKER' : 'PATIENT',
-    requestedRole: profile.requestedRole,
-    facilityId: profile.facilityId,
-    motherId: profile.motherId ?? null,
-    title: profile.title,
-    licenseNumber: null,
+}
+
+export async function register(input: RegistrationInput, options: RegisterOptions = {}): Promise<Actor> {
+  const parsed = registrationSchema.parse(input);
+  const registry = services();
+
+  const settings = await registry.data.get('settings', 'global').catch(() => null);
+  if (settings && settings.registrationOpen === false) {
+    throw new AppError('Registration is currently closed on this deployment. Contact support for an account.', 'FORBIDDEN');
+  }
+
+  const countryCode = COUNTRIES.some((country) => country.code === parsed.country) ? parsed.country : 'ZM';
+  const requiresApproval = settings ? settings.providerApprovalsRequired !== false : true;
+
+  const profileBase = {
+    fullName: parsed.fullName,
+    email: parsed.email,
+    phone: parsed.phone || null,
+    dateOfBirth: parsed.dateOfBirth || null,
+    country: countryCode,
+    language: parsed.language as LanguageCode,
+    role: parsed.role,
+    status: (parsed.role === 'PROVIDER' && requiresApproval ? 'PENDING_APPROVAL' : 'ACTIVE') as UserProfile['status'],
+    emergencyContact:
+      parsed.emergencyName && parsed.emergencyPhone
+        ? { name: parsed.emergencyName, phone: parsed.emergencyPhone, relationship: parsed.emergencyRelationship || 'Family' }
+        : null,
+    supportsUserId: null,
+    consentAt: new Date().toISOString(),
+    lastLoginAt: new Date().toISOString(),
+    privilegeVersion: 1,
     photoUrl: null,
     photoPublicId: null,
-    emailVerified: false,
-    country: profile.country,
-    preferredLanguage: profile.preferredLanguage,
-    pushEnabled: false,
-    createdAt: now,
-    createdBy: uid,
-    updatedAt: now,
-    updatedBy: null,
-    lastLoginAt: now,
-    deactivatedAt: null,
-    deactivatedBy: null,
-    deactivationReason: null,
-  };
-}
+    providerId: null,
+    facilityId: null,
+    notificationPrefs: { ...DEFAULT_NOTIFICATION_PREFS },
+  } satisfies Omit<UserProfile, 'id' | 'uid' | 'createdAt' | 'updatedAt'>;
 
-/**
- * Writes the brand-new profile.
- *
- * Firebase: the rules allow a signed-up user to create exactly their own
- * document with a non-privileged role and without server-managed fields (see
- * `firestore.rules` → `match /users/{userId}`). Device provider: provisioning is
- * done by the auth layer (there is no token service to authenticate against yet).
- */
-async function persistSelfProfile(
-  uid: string,
-  document: SelfProfileDocument,
-  kind: 'firebase' | 'local',
-): Promise<void> {
-  const registry = services();
-  if (kind === 'local') {
-    const provider = registry.provider as unknown as { provisionUser(row: unknown): Promise<unknown> };
-    await provider.provisionUser(document);
-    return;
+  /* Resolve a supporter's invitation before the account exists, so the link is
+   * attached at creation and the mother does not have to approve twice. */
+  let supportsUserId: string | null = null;
+  if (parsed.role === 'SUPPORTER' && parsed.supportsEmail) {
+    const invitations = await registry.data.rows('supporters', {
+        where: [{ field: 'supporterEmail', op: '==', value: parsed.supportsEmail.toLowerCase() }],
+      })
+      .catch(() => []);
+    supportsUserId = invitations.find((row) => row.status !== 'revoked')?.motherUserId ?? null;
   }
-  await registry.provider.create('users', document as never, {
-    uid,
-    email: document.email,
-    displayName: document.fullName,
-    role: DEFAULT_ROLE_FOR_SELF_REGISTRATION,
-    facilityId: document.facilityId,
-    accountStatus: document.status,
-    motherId: null,
-    privilegeVersion: 1,
-    claimsSource: 'firebase-id-token',
-  });
-}
 
-/**
- * Removes the authentication account of a registration whose profile write
- * failed, so the person can immediately try again with the same email address.
- * Best effort: if the browser refuses (the password is not at hand), the error
- * the user sees still says what to do.
- */
-async function rollbackHalfCreatedAccount(uid: string): Promise<void> {
-  const registry = services();
-  try {
-    if (registry.provider.kind === 'local') {
-      const provider = registry.provider as unknown as { remove(...args: unknown[]): Promise<void> };
-      await provider.remove('users', uid, null).catch(() => null);
-      return;
+  const profile = { ...profileBase, supportsUserId };
+
+  /* Create the identity, then the profile. */
+  if (registry.auth.kind === 'local') {
+    await localAuth.createAccount({ email: parsed.email, password: parsed.password, profile });
+  } else {
+    await firebaseAuth.createAccount({ email: parsed.email, password: parsed.password, profile });
+  }
+
+  const actor = await registry.auth.refreshClaims();
+  if (!actor) throw new AppError('Your account was created but could not be loaded. Please sign in.', 'UNKNOWN', { retryable: true });
+
+  /* Provider directory record. */
+  if (parsed.role === 'PROVIDER' && parsed.profession) {
+    const provider = await registry.data.create('providers', {
+      userId: actor.uid,
+      fullName: parsed.fullName,
+      title: parsed.title || null,
+      profession: parsed.profession as Profession,
+      facilityId: parsed.facilityId || null,
+      facilityName: parsed.facilityName || 'Not stated',
+      licenseNumber: parsed.licenseNumber || null,
+      languages: [parsed.language === 'en' ? 'English' : parsed.language],
+      bio: null,
+      phone: parsed.phone || null,
+      email: parsed.email,
+      photoUrl: null,
+      photoPublicId: null,
+      status: requiresApproval ? 'pending' : 'approved',
+      verifiedBy: null,
+      verifiedAt: requiresApproval ? null : new Date().toISOString(),
+      rejectionReason: null,
+      acceptingNewPatients: false,
+      listedInDirectory: !requiresApproval,
+    } as Omit<HealthcareProvider, 'id' | 'createdAt'>);
+    await registry.data.update('users', actor.uid, { providerId: provider.id }).catch(() => undefined);
+  }
+
+  /* Pregnancy, so the tracker is useful from the first screen. */
+  if (parsed.role === 'MOTHER' && options.pregnancy && (options.pregnancy.lmpDate || options.pregnancy.eddDate)) {
+    await registry.data.create('pregnancies', {
+      userId: actor.uid,
+      lmpDate: options.pregnancy.lmpDate,
+      eddDate: options.pregnancy.eddDate,
+      datingMethod: options.pregnancy.datingMethod,
+      previousPregnancies: options.pregnancy.previousPregnancies,
+      previousLiveBirths: options.pregnancy.previousLiveBirths,
+      status: 'active',
+      deliveryDate: null,
+      postnatalSince: null,
+      facilityId: null,
+      notes: null,
+    }).catch(() => undefined);
+  }
+
+  /* Claim any supporter invitation addressed to this email. */
+  if (parsed.role === 'SUPPORTER') {
+    const invitations = await registry.data.rows('supporters', {
+        where: [{ field: 'supporterEmail', op: '==', value: parsed.email }],
+      })
+      .catch(() => []);
+    for (const invitation of invitations) {
+      await registry.data
+        .update('supporters', invitation.id, {
+          supporterUserId: actor.uid,
+          status: 'active',
+          acceptedAt: new Date().toISOString(),
+        })
+        .catch(() => undefined);
     }
-    await registry.auth.signOut();
-    const { getFirebaseAuth } = await import('@/services/firebase/app');
-    const { deleteUser } = await import('firebase/auth');
-    const user = getFirebaseAuth().currentUser;
-    if (user && user.uid === uid) await deleteUser(user);
-  } catch (error) {
-    logProviderError('registration rollback', error);
-  }
-}
-
-/** Creates a patient login for an already-registered mother (linked by id). */
-export async function invitePatientAccount(input: {
-  motherId: string;
-  fullName: string;
-  email: string;
-  phone: string;
-  facilityId: string;
-  temporaryPassword: string;
-  country?: string | null;
-}): Promise<{ uid: string }> {
-  const registry = services();
-  const actor = registry.require();
-  const email = input.email.trim().toLowerCase();
-  const claims: AuthClaims = { role: 'MOTHER', facilityId: input.facilityId, accountStatus: 'ACTIVE', motherId: input.motherId };
-  const { uid } = await registry.auth.register({
-    fullName: input.fullName,
-    email,
-    phone: input.phone,
-    password: input.temporaryPassword,
-    claims,
-  });
-
-  const document = buildSelfProfileDocument({
-    uid,
-    profile: {
-      fullName: input.fullName,
-      email,
-      phone: input.phone,
-      facilityId: input.facilityId,
-      isHealthWorker: false,
-      requestedRole: null,
-      title: null,
-      country: (input.country || actor.country || defaultCountry.code).toUpperCase(),
-      preferredLanguage: 'English',
-      motherId: input.motherId,
-    },
-  });
-
-  await persistSelfProfile(uid, { ...document, createdBy: actor.uid }, registry.provider.kind);
-
-  // The staff-invited flow links the login to the mother's record. `motherId` is
-  // server-managed on `users`, so it is written through the data layer, which
-  // stamps the actor and records the audit entry.
-  await registry.data.update('mothers', input.motherId, { userId: uid } as never);
-  await registry.data.audit('user.created', 'user', uid, { label: `${input.fullName} (patient login)`, metadata: { via: 'staff invite' } });
-  return { uid };
-}
-
-/**
- * First-run administrator.
- *
- * Firebase deployments: the API service elevates the caller only if their
- * verified email is on the server-side allow-list (MC_BOOTSTRAP_ADMIN_EMAILS).
- * Device provider: the same rule shape is enforced against
- * VITE_LOCAL_ADMIN_EMAILS, and it is a demonstration control, not a production
- * privilege path — which is why it is unavailable whenever Firebase is wired up.
- */
-export async function bootstrapAdministrator(): Promise<{ ok: boolean; email: string; via: 'server' | 'device-allowlist' }> {
-  const registry = services();
-  const actor = registry.require();
-  const email = actor.email.trim().toLowerCase();
-
-  if (registry.provider.kind === 'firebase') {
-    const { bootstrapAdministrator: callApi } = await import('@/services/api/client');
-    const result = await callApi().catch((error: unknown) => {
-      throw toAppError(error, 'The server did not accept this elevation. Check the bootstrap allow-list configuration.');
-    });
-    await registry.data.audit('user.role_changed', 'user', actor.uid, { label: email, metadata: { role: 'ADMIN', via: 'bootstrap-allowlist' } });
-    await registry.refresh();
-    return { ok: true, email: result.email ? String(result.email) : email, via: 'server' };
   }
 
-  if (app.bootstrapAdminEmails.length === 0 || !app.bootstrapAdminEmails.includes(email)) {
-    throw new AppError(
-      'This email is not on the administrator allow-list for this deployment. Set VITE_LOCAL_ADMIN_EMAILS (device mode) or MC_BOOTSTRAP_ADMIN_EMAILS on the server.',
-      'FORBIDDEN',
-    );
-  }
-  const provider = registry.provider as unknown as {
-    update(name: 'users', id: string, patch: Record<string, unknown>, actor: unknown): Promise<unknown>;
-  };
-  await provider.update(
-    'users',
-    actor.uid,
-    { role: 'ADMIN', status: 'ACTIVE', privilegeVersion: Date.now(), updatedAt: new Date().toISOString() },
-    { ...actor, role: 'ADMIN', accountStatus: 'ACTIVE' },
-  );
-  await registry.data.audit('user.role_changed', 'user', actor.uid, { label: email, metadata: { role: 'ADMIN', via: 'device-allowlist' } });
-  await registry.refresh();
-  return { ok: true, email, via: 'device-allowlist' };
+  await logAudit('register', 'users', actor.uid, `${parsed.role} · ${slugify(parsed.email)}`);
+  return actor;
 }
-
-export const canRequestBootstrap = (): boolean =>
-  integrations.provider === 'local'
-    ? app.bootstrapAdminEmails.length > 0
-    : integrations.firebase.configured;
-
-export const newResetFlowId = (): string => newId('rst');
-
-/** Re-exported for the admin console: the profile rows the console lists. */
-export type { UserProfile };

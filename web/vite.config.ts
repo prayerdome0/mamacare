@@ -1,5 +1,5 @@
 import { build as esbuild } from 'esbuild';
-import { defineConfig, loadEnv, type Plugin, type ProxyOptions } from 'vite';
+import { defineConfig, loadEnv, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import { fileURLToPath, URL } from 'node:url';
@@ -7,15 +7,13 @@ import { fileURLToPath, URL } from 'node:url';
 /**
  * MAMA CARE web client.
  *
- * The API layer (Cloudinary signed uploads, Firebase Admin operations) runs as a
- * separate Node service in `../server`. In development the browser only ever calls
- * the relative path `/api/*`, which Vite proxies to that service. In production the
- * same relative path is rewritten by the hosting layer (see firebase.json / the
- * deployment docs) — no absolute backend URLs and no secrets are ever baked into
- * the client bundle.
+ * There is no backend service in this repository. The browser talks to Firebase
+ * (Auth, Firestore, Storage, Cloud Messaging) and to Cloudinary's unsigned upload
+ * endpoint directly; every authorisation decision is made by `firestore.rules` and
+ * `storage.rules`, not by a server we operate. Nothing is proxied, so nothing needs
+ * a secret in the client bundle beyond the public Firebase web config.
  */
 const PORT = Number(process.env.PORT ?? 5173);
-const API_PORT = Number(process.env.VITE_API_PORT ?? 8787);
 
 /**
  * Compiles the Firebase Messaging service worker with the Firebase SDK bundled in,
@@ -37,6 +35,7 @@ function firebaseMessagingSw(env: Record<string, string | undefined>, mode: stri
         'VITE_FIREBASE_STORAGE_BUCKET',
         'VITE_FIREBASE_MESSAGING_SENDER_ID',
         'VITE_FIREBASE_APP_ID',
+        'VITE_FIREBASE_VAPID_KEY',
       ]) {
         defines[`import.meta.env.${key}`] = JSON.stringify(env[key] ?? '');
       }
@@ -64,38 +63,19 @@ function firebaseMessagingSw(env: Record<string, string | undefined>, mode: stri
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '');
-  const apiTarget = env.VITE_API_ORIGIN || `http://127.0.0.1:${API_PORT}`;
-
-  const proxy: Record<string, ProxyOptions> = {
-    '/api': {
-      target: apiTarget,
-      changeOrigin: true,
-      // The preview environment forwards arbitrary hostnames; keep the dev proxy
-      // reachable while still rejecting unrelated origins.
-      configure: (server) => {
-        server?.on?.('proxyReq', (proxyReq: { setHeader: (k: string, v: string) => void }) => {
-          proxyReq.setHeader('x-mamacare-client', 'web');
-        });
-      },
-    },
-  };
 
   return {
     plugins: [react(), tailwindcss(), firebaseMessagingSw(env, mode)],
     resolve: {
       alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },
     },
-    define: {
-      // Fail loudly if the API service is not reachable instead of silently
-      // returning HTML error pages into JSON parsers.
-      __MC_API_TARGET__: JSON.stringify(apiTarget),
-    },
     server: {
+      // Bind to every interface and accept any hostname: the app is previewed
+      // through a proxy and tested on phones over the local network.
       host: true,
       port: PORT,
       strictPort: true,
       allowedHosts: true,
-      proxy,
     },
     preview: { host: true, port: PORT, allowedHosts: true },
     build: {
@@ -105,10 +85,11 @@ export default defineConfig(({ mode }) => {
       chunkSizeWarningLimit: 900,
       rollupOptions: {
         output: {
+          // Vendor chunks are split so a returning mother re-downloads only the
+          // route she opened, not React and the Firebase SDK with it.
           manualChunks: {
             react: ['react', 'react-dom', 'react-router-dom'],
             firebase: ['firebase/app', 'firebase/auth', 'firebase/firestore'],
-            pdf: ['jspdf', 'jspdf-autotable'],
           },
         },
       },

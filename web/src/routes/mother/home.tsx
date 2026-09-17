@@ -1,263 +1,376 @@
-import { Link } from 'react-router-dom';
-import { Bell, BookOpen, CalendarClock, HeartPulse, ShieldCheck } from 'lucide-react';
-import { AppShell } from '@/components/layout/shell';
-import { Card, KeyValue } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { EmptyState, ErrorState, LoadingRows, NoticeState, ProgressBar, RiskBadge } from '@/components/ui/display';
-import { DangerSignsCard, NoRecordNotice, useMotherRecord } from '@/routes/mother/shared';
-import { useAsync } from '@/hooks';
-import { services } from '@/services/session-store';
-import { formatDate, toIsoDate } from '@/lib/utils';
-import { shortGestationalAge } from '@/lib/obstetrics';
-
 /**
- * What a mother sees first: how far along the clinic has dated her, when she is
- * next expected, the signs that mean “go today”, and reading for this stage.
- * Nothing here interprets a result — the explanation belongs to her clinician.
+ * Mother home — the screen that answers "what do I need to know today?"
+ *
+ * Order matters here: the thing that could hurt someone comes first, then today's
+ * tasks, then the journey, then everything else. Nothing on this screen requires
+ * scrolling to find an emergency route.
  */
+
+import { useEffect, useMemo } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
+import {
+  Baby,
+  BookOpen,
+  CalendarDays,
+  ChevronRight,
+  MapPin,
+  MessageCircle,
+  NotebookPen,
+  Pill,
+  Plus,
+  Syringe,
+} from 'lucide-react';
+import { useAsync } from '@/hooks';
+import { useMotherContext, firstName, greeting, type MotherContext } from '@/hooks/use-mother';
+import { immunizationRepo, reminderRepo } from '@/services/repositories';
+import { weekGuide } from '@/config/weekly-guide';
+import { formatBabyAge, ageInMonths } from '@/config/baby-development';
+import { formatDate, relativeTime } from '@/lib/utils';
+import { AppShell, PageHeader } from '@/components/layout/app-shell';
+import { DueDateCard, NextAppointmentStrip, TrimesterTrack, WeekRing } from '@/components/pregnancy/pregnancy-widgets';
+import { EmergencyButton } from '@/components/emergency/emergency-panel';
+import { Button } from '@/components/ui/button';
+import { Card, SectionHeading } from '@/components/ui/card';
+import { Badge, EmptyState, LoadingRows } from '@/components/ui/display';
+import { useToast } from '@/components/ui/toast';
+
 export default function MotherHome() {
-  const { motherId, chart, overview } = useMotherRecord();
-  const reading = useAsync(async () => (motherId ? services().data.listEducation('MOTHER', null) : []), { deps: [motherId] });
+  const mother = useMotherContext();
+  const navigate = useNavigate();
+  const toast = useToast();
+  const { activeBaby } = mother;
 
-  if (!motherId) {
-    return (
-      <AppShell title="My pregnancy">
-        <NoRecordNotice />
-      </AppShell>
-    );
-  }
+  const { data: nextVaccine } = useAsync(
+    () => (activeBaby ? immunizationRepo.nextDue(activeBaby.id) : Promise.resolve(null)),
+    { deps: [activeBaby?.id], immediate: Boolean(activeBaby) },
+  );
 
-  if ((chart.loading && !chart.data) || (overview.loading && !overview.data)) {
-    return (
-      <AppShell title="My pregnancy">
-        <Card>
-          <LoadingRows rows={4} />
-        </Card>
-      </AppShell>
-    );
-  }
+  const guide = useMemo(() => (mother.ga ? weekGuide(mother.ga.weeks) : null), [mother.ga]);
 
-  if (chart.error || !chart.data || !overview.data) {
-    return (
-      <AppShell
-        title="My pregnancy"
-        actions={
-          <Button size="sm" variant="secondary" onClick={() => void chart.run()}>
-            Try again
-          </Button>
-        }
-      >
-        <ErrorState
-          title="We could not load your record"
-          message={`${chart.error ?? 'It is not available right now.'} Nothing is wrong with your record — this is a connection problem.`}
-          onRetry={() => {
-            void chart.run();
-            void overview.run();
-          }}
-        />
-      </AppShell>
-    );
-  }
+  useEffect(() => {
+    document.title = mother.mode === 'setup' ? 'Set up your journey · Mama Care' : 'Home · Mama Care';
+  }, [mother.mode]);
 
-  const { mother, visits } = chart.data;
-  const summary = overview.data;
-  const ga = summary.ga;
-  const today = toIsoDate(new Date());
-  const unresolved = summary.openAlerts;
-  const forHer = (reading.data ?? []).slice(0, 3);
+  const markTaken = async (id: string, title: string): Promise<void> => {
+    try {
+      await reminderRepo.markTaken(id);
+      toast.success('Recorded', `${title} marked as taken.`);
+      mother.refresh();
+    } catch {
+      toast.error('That did not save', 'Check your connection and try again.');
+    }
+  };
 
   return (
-    <AppShell
-      title={`Hello, ${mother.fullName.split(' ')[0]}`}
-      subtitle={ga.valid ? `${shortGestationalAge(ga)} weeks · ${ga.trimester}${ga.trimester === 1 ? 'st' : ga.trimester === 2 ? 'nd' : 'rd'} trimester` : 'Your dating is being confirmed by the clinic'}
-    >
-      <div className="grid gap-4 xl:grid-cols-[1.5fr_1fr]">
-        <div className="space-y-4">
-          <Card title="Your pregnancy" description="Everything here is what your clinic wrote down at your visits.">
-            <div className="mb-4">
-              <div className="mb-1.5 flex flex-wrap items-baseline justify-between gap-2">
-                <p className="micro">How far along</p>
-                <p className="text-[0.86rem] font-semibold text-ink-900 tnum">{ga.valid ? `${shortGestationalAge(ga)} weeks` : 'Not dated yet'}</p>
-              </div>
-              <ProgressBar value={ga.progressPct} label="Your journey to the due date" size="md" />
-              <p className="caption mt-1.5">
-                Expected delivery date {formatDate(summary.edd)}. Dates can move by a few days after a scan — your clinic will tell you if yours changes.
-              </p>
-            </div>
+    <AppShell>
+      <PageHeader
+        title={`${greeting()}, ${firstName(mother.profile?.fullName ?? 'Mama')}`}
+        description={
+          mother.mode === 'setup'
+            ? 'Add your pregnancy dates or your baby’s details and this page will fill in around them.'
+            : mother.mode === 'postnatal'
+              ? 'You are in Mother & Baby mode. Your pregnancy record is kept, and the baby screens are now front and centre.'
+              : `Today is ${formatDate(new Date(), 'long')}.`
+        }
+        actions={<EmergencyButton onClick={() => navigate('/app/emergency')} />}
+      />
 
-            <KeyValue
-              columns={2}
-              items={[
-                { label: 'Next appointment', value: summary.nextAppointment ? `${formatDate(summary.nextAppointment.scheduledFor)} at ${summary.nextAppointment.time}` : 'Not booked', tone: 'strong' },
-                { label: 'Last visit', value: summary.lastVisit ? formatDate(summary.lastVisit.visitDate) : 'None recorded' },
-                { label: 'Visits attended', value: visits.filter((row) => row.visitDate <= today).length },
-                { label: 'Care level recorded', value: <RiskBadge level={mother.riskLevel ?? 'GREEN'} /> },
-              ]}
-            />
+      {mother.loading ? <LoadingRows rows={4} /> : null}
+      {mother.error ? <p className="alert alert-error">{mother.error}</p> : null}
 
-            {!summary.nextAppointment ? (
-              <div className="mt-3">
-                <NoticeState tone="warning" title="You have no next visit booked" compact>
-                  Please call the clinic and arrange one. Keeping your visits is how problems are found early — and most problems are easy to treat when they
-                  are found soon.
-                </NoticeState>
-              </div>
-            ) : null}
-          </Card>
+      {!mother.loading && mother.mode === 'setup' ? <SetupPrompt mother={mother} /> : null}
 
-          {visits.length > 0 ? (
-            <Card title="What your clinic measured" description="Your numbers, as recorded. Your midwife explains what they mean for you.">
-              <ul className="divide-y divide-ink-100">
-                {visits.slice(0, 4).map((visit) => (
-                  <li key={visit.id} className="flex flex-wrap items-center justify-between gap-3 py-2.5 first:pt-0 last:pb-0">
-                    <div>
-                      <p className="text-[0.88rem] font-semibold text-ink-900">{formatDate(visit.visitDate)}</p>
-                      <p className="caption mt-0.5">
-                        {visit.gestationalAge.weeks} weeks {visit.gestationalAge.days} days ·{' '}
-                        {visit.visitType === 'BOOKING' ? 'first visit' : visit.visitType.replace(/_/g, ' ').toLowerCase()}
+      {!mother.loading && mother.mode !== 'setup' ? (
+        <div className="grid gap-4 lg:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)]">
+          <div className="space-y-4">
+            <Card className="card-pad">
+              <div className="flex flex-wrap items-center gap-6">
+                <WeekRing ga={mother.ga} />
+                <div className="min-w-0 flex-1">
+                  {mother.mode === 'pregnancy' && mother.ga ? (
+                    <>
+                      <p className="micro">This week</p>
+                      <p className="mt-1 text-lg font-bold text-ink-900">
+                        Week {mother.ga.weeks}
+                        <span className="text-ink-500"> · {mother.ga.days} day{mother.ga.days === 1 ? '' : 's'}</span>
                       </p>
-                    </div>
-                    <div className="flex flex-wrap gap-x-4 gap-y-1 text-[0.82rem] text-ink-700 tnum">
-                      <span>BP {visit.vitals.systolicBp ? `${visit.vitals.systolicBp}/${visit.vitals.diastolicBp ?? '—'}` : '—'}</span>
-                      <span>Weight {visit.vitals.weightKg ? `${visit.vitals.weightKg} kg` : '—'}</span>
-                      <span>Baby’s heartbeat {visit.vitals.fetalHeartRate ?? '—'}</span>
-                    </div>
-                  </li>
-                ))}
-              </ul>
+                      <p className="mt-1 text-sm text-ink-600">
+                        Trimester {mother.ga.trimester} · your baby is about the size of {guide?.size ?? 'a seed'}
+                      </p>
+                      {guide?.milestone ? (
+                        <p className="mt-2">
+                          <Badge tone="green">{guide.milestone}</Badge>
+                        </p>
+                      ) : null}
+                      <div className="mt-4 flex flex-wrap gap-2">
+                        <Link to="/app/guide" className="btn btn-primary btn-sm">
+                          Open this week’s guide
+                        </Link>
+                        <Link to="/app/pregnancy" className="btn btn-secondary btn-sm">
+                          Tracker details
+                        </Link>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <p className="micro">Mother & Baby mode</p>
+                      <p className="mt-1 text-lg font-bold text-ink-900">
+                        {activeBaby ? activeBaby.name : 'Your baby'}
+                      </p>
+                      <p className="mt-1 text-sm text-ink-600">
+                        {activeBaby ? formatBabyAge(activeBaby.dateOfBirth) : 'Add your baby to start the record.'}
+                      </p>
+                      <div className="mt-4 flex flex-wrap gap-2">
+                        <Link to="/app/baby" className="btn btn-primary btn-sm">
+                          Open baby record
+                        </Link>
+                        <Link to="/app/pregnancy" className="btn btn-secondary btn-sm">
+                          Pregnancy record
+                        </Link>
+                      </div>
+                    </>
+                  )}
+                </div>
+              </div>
+              {mother.mode === 'pregnancy' ? (
+                <div className="mt-5 border-t border-ink-100 pt-4">
+                  <TrimesterTrack ga={mother.ga} />
+                </div>
+              ) : null}
+            </Card>
+
+            {mother.nextAppointment ? (
+              <NextAppointmentStrip
+                date={mother.nextAppointment.date}
+                time={mother.nextAppointment.time}
+                facilityName={mother.nextAppointment.facilityName}
+                purpose={mother.nextAppointment.purpose}
+              />
+            ) : (
+              <Card className="card-pad">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <p className="card-title">No appointment booked yet</p>
+                    <p className="mt-1 text-sm text-ink-600">
+                      Add your next antenatal visit and Mama Care will remind you ahead of it.
+                    </p>
+                  </div>
+                  <Link to="/app/appointments" className="btn btn-primary btn-sm">
+                    <Plus className="size-4" aria-hidden /> Add appointment
+                  </Link>
+                </div>
+              </Card>
+            )}
+
+            {guide && mother.mode === 'pregnancy' ? (
+              <Card className="card-pad">
+                <SectionHeading eyebrow={`Week ${guide.week}`} title="What is happening" />
+                <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                  <div>
+                    <p className="micro">Your baby</p>
+                    <p className="mt-1 text-sm leading-relaxed text-ink-700">{guide.baby}</p>
+                  </div>
+                  <div>
+                    <p className="micro">Your body</p>
+                    <p className="mt-1 text-sm leading-relaxed text-ink-700">{guide.body}</p>
+                  </div>
+                </div>
+                <div className="mt-4">
+                  <Link to="/app/guide" className="btn btn-secondary btn-sm">
+                    Read the full week <ChevronRight className="size-4" aria-hidden />
+                  </Link>
+                </div>
+              </Card>
+            ) : null}
+
+            {activeBaby && nextVaccine ? (
+              <Card className="card-pad border-brand-200 bg-brand-50/40">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="micro flex items-center gap-1.5">
+                      <Syringe className="size-3.5" aria-hidden /> Next immunization
+                    </p>
+                    <p className="mt-1 text-base font-semibold text-ink-900">
+                      {nextVaccine.vaccineName} · {nextVaccine.dose}
+                    </p>
+                    <p className="mt-1 text-sm text-ink-600">
+                      Due {formatDate(nextVaccine.scheduledDate, 'long')} ({nextVaccine.scheduledAgeLabel}) ·{' '}
+                      {relativeTime(nextVaccine.scheduledDate)}
+                    </p>
+                  </div>
+                  <Link to="/app/baby" className="btn btn-primary btn-sm">
+                    Immunization card
+                  </Link>
+                </div>
+              </Card>
+            ) : null}
+          </div>
+
+          <div className="space-y-4">
+            <Card className="card-pad">
+              <SectionHeading eyebrow="Today" title={mother.dueToday.length > 0 ? 'Due today' : 'Nothing due today'} />
+              {mother.dueToday.length === 0 ? (
+                <p className="mt-2 text-sm text-ink-600">
+                  No medication or supplements are scheduled for today.{' '}
+                  <Link to="/app/reminders" className="font-medium text-brand-800 hover:underline">
+                    Manage reminders
+                  </Link>
+                </p>
+              ) : (
+                <ul className="mt-3 space-y-2">
+                  {mother.dueToday.slice(0, 4).map((reminder) => (
+                    <li key={reminder.id} className="flex items-center justify-between gap-3 rounded-lg border border-ink-100 px-3 py-2">
+                      <span className="min-w-0">
+                        <span className="block truncate text-sm font-medium text-ink-800">{reminder.title}</span>
+                        <span className="block truncate text-xs text-ink-500">
+                          {[reminder.medicine, reminder.dose, reminder.times.join(', ')].filter(Boolean).join(' · ')}
+                        </span>
+                      </span>
+                      <Button variant="secondary" size="sm" onClick={() => void markTaken(reminder.id, reminder.title)}>
+                        Taken
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              )}
               <div className="mt-3">
-                <Link to="/home/records" className="btn btn-secondary btn-sm">
-                  See my full record
+                <Link to="/app/reminders" className="btn btn-ghost btn-sm">
+                  All reminders
                 </Link>
               </div>
             </Card>
-          ) : (
-            <Card>
-              <EmptyState
-                icon={<HeartPulse className="size-5" aria-hidden />}
-                title="Your first visit has not been recorded"
-                description="At your first antenatal visit the midwife records how far along you are, checks your blood pressure and blood, and starts this record. Bring your health card if you have one."
-              />
-            </Card>
-          )}
 
-          <DangerSignsCard />
-        </div>
+            <DueDateCard
+              ga={mother.ga}
+              eddDate={mother.pregnancy?.eddDate ?? null}
+              lmpDate={mother.pregnancy?.lmpDate ?? null}
+              datingMethod={mother.pregnancy?.datingMethod}
+            />
 
-        <div className="space-y-4">
-          {unresolved.length > 0 ? (
-            <Card title="Your clinic would like to see you">
-              <NoticeState tone="warning" title="Please contact your clinic today" compact>
-                They recorded something they want to check with you in person. Call the facility or come to the antenatal clinic. If you have any of the danger
-                signs listed on this page, go now — do not wait.
-              </NoticeState>
-            </Card>
-          ) : null}
+            {mother.unreadNotifications > 0 ? (
+              <Card className="card-pad">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="card-title">{mother.unreadNotifications} unread notification{mother.unreadNotifications === 1 ? '' : 's'}</p>
+                    <p className="mt-1 text-sm text-ink-600">Reminders, appointment changes and messages.</p>
+                  </div>
+                  <Link to="/app/notifications" className="btn btn-secondary btn-sm">
+                    Open
+                  </Link>
+                </div>
+              </Card>
+            ) : null}
 
-          {summary.reminders.length > 0 ? (
-            <Card title="Reminders from your clinic">
-              <ul className="space-y-2.5">
-                {summary.reminders.map((reminder) => (
-                  <li
-                    key={reminder.label}
-                    className={`rounded-lg border p-3 ${
-                      reminder.tone === 'critical'
-                        ? 'border-[var(--color-risk-red-border)] bg-[var(--color-risk-red-soft)]'
-                        : reminder.tone === 'warning'
-                          ? 'border-[var(--color-risk-amber-border)] bg-[var(--color-risk-amber-soft)]'
-                          : 'border-ink-200 bg-ink-50'
-                    }`}
+            <Card className="card-pad">
+              <SectionHeading eyebrow="Shortcuts" title="Go straight to" />
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                {[
+                  { to: '/app/pregnancy', label: 'Tracker', icon: <CalendarDays className="size-4" aria-hidden /> },
+                  { to: '/app/baby', label: 'My baby', icon: <Baby className="size-4" aria-hidden /> },
+                  { to: '/app/learn', label: 'Learn', icon: <BookOpen className="size-4" aria-hidden /> },
+                  { to: '/app/journal', label: 'Journal', icon: <NotebookPen className="size-4" aria-hidden /> },
+                  { to: '/app/facilities', label: 'Facilities', icon: <MapPin className="size-4" aria-hidden /> },
+                  { to: '/app/messages', label: 'Messages', icon: <MessageCircle className="size-4" aria-hidden /> },
+                  { to: '/app/reminders', label: 'Reminders', icon: <Pill className="size-4" aria-hidden /> },
+                  { to: '/app/emergency', label: 'Emergency', icon: <EmergencyDot />, danger: true },
+                ].map((item) => (
+                  <Link
+                    key={item.to}
+                    to={item.to}
+                    className={
+                      item.danger
+                        ? 'flex items-center gap-2 rounded-lg border border-[var(--color-risk-red-border)] bg-[var(--color-risk-red-soft)] px-3 py-2.5 text-sm font-semibold text-ink-800'
+                        : 'flex items-center gap-2 rounded-lg border border-ink-200 px-3 py-2.5 text-sm font-semibold text-ink-700 hover:border-brand-300'
+                    }
                   >
-                    <p className="text-[0.86rem] font-semibold text-ink-900">{reminder.label}</p>
-                    <p className="caption mt-0.5">{reminder.detail}</p>
-                  </li>
+                    <span className={item.danger ? 'text-[var(--color-risk-red)]' : 'text-brand-700'}>{item.icon}</span>
+                    {item.label}
+                  </Link>
                 ))}
-              </ul>
-            </Card>
-          ) : null}
-
-          <Card title="Next appointment" actions={<Link to="/home/appointments" className="text-[0.78rem] font-semibold text-brand-800 hover:underline">All</Link>}>
-            {summary.nextAppointment ? (
-              <div className="space-y-1.5">
-                <p className="text-[1rem] font-semibold text-ink-900">{formatDate(summary.nextAppointment.scheduledFor)}</p>
-                <p className="muted">
-                  {summary.nextAppointment.time} · {summary.nextAppointment.reason?.trim() || 'Routine antenatal visit'}
-                </p>
-                <p className="caption">
-                  {summary.daysUntilAppointment === null
-                    ? 'This visit has passed'
-                    : summary.daysUntilAppointment === 0
-                      ? 'Today'
-                      : summary.daysUntilAppointment === 1
-                        ? 'Tomorrow'
-                        : `In ${summary.daysUntilAppointment} days`}
-                </p>
-                <ul className="mt-2 space-y-1 text-[0.84rem] text-ink-700">
-                  <li>· Bring your health card.</li>
-                  <li>· Write down what you want to ask.</li>
-                  <li>· Come with someone if that helps you.</li>
-                </ul>
               </div>
-            ) : (
-              <EmptyState icon={<CalendarClock className="size-5" aria-hidden />} title="Nothing booked yet" description="Ask the clinic before you leave next time — or call them now." />
-            )}
-          </Card>
-
-          <Card title="Reading for this stage" description="Short pieces your clinic published for you.">
-            {reading.loading ? (
-              <LoadingRows rows={2} />
-            ) : forHer.length === 0 ? (
-              <p className="text-[0.86rem] text-ink-600">Nothing published in your language yet. Ask your midwife — reading never replaces asking.</p>
-            ) : (
-              <ul className="space-y-2.5">
-                {forHer.map((item) => (
-                  <li key={item.id}>
-                    <Link
-                      to={`/home/education?open=${item.id}`}
-                      className="group flex items-start gap-2.5 rounded-lg border border-ink-200 p-2.5 transition-colors hover:border-brand-300 hover:bg-brand-50/40"
-                    >
-                      <span className="min-w-0">
-                        <span className="block text-[0.86rem] font-semibold text-ink-900">{item.title}</span>
-                        <span className="caption mt-0.5 block line-clamp-2">{item.summary}</span>
-                        <span className="caption mt-1 block">
-                          {item.language} · {item.readingMinutes} min
-                        </span>
-                      </span>
-                    </Link>
-                  </li>
-                ))}
-              </ul>
-            )}
-            <div className="mt-3">
-              <Link to="/home/education" className="btn btn-secondary btn-sm w-full">
-                <BookOpen className="size-4" aria-hidden /> All my reading
-              </Link>
-            </div>
-          </Card>
-
-          <Card title="Messages">
-            <p className="text-[0.86rem] text-ink-600">
-              Reminders and notes from your clinic arrive here. Keep this app on your phone so you do not miss a visit.
-            </p>
-            <div className="mt-3">
-              <Link to="/home/notifications" className="btn btn-secondary btn-sm">
-                <Bell className="size-4" aria-hidden /> Open my messages
-              </Link>
-            </div>
-          </Card>
-
-          <Card title="Who can see your record">
-            <p className="text-[0.86rem] leading-relaxed text-ink-600">
-              Your clinic’s staff, and you. Nobody else — not other patients, not the public pages of this site. Access is enforced by the database rules and
-              every read or change is logged.
-            </p>
-            <p className="caption mt-2 flex items-start gap-1.5">
-              <ShieldCheck className="mt-0.5 size-3.5 shrink-0 text-[var(--color-risk-green)]" aria-hidden />
-              If something looks wrong, tell the clinic: corrections are added to the record, never quietly overwritten.
-            </p>
-          </Card>
+            </Card>
+          </div>
         </div>
-      </div>
+      ) : null}
     </AppShell>
+  );
+}
+
+function EmergencyDot() {
+  return <span className="grid size-4 place-items-center rounded-full bg-[var(--color-risk-red)] text-[0.6rem] font-bold text-white">!</span>;
+}
+
+function SetupPrompt({ mother }: { mother: MotherContext }) {
+  const activeBaby = mother.activeBaby;
+  const babyAge = activeBaby ? ageInMonths(activeBaby.dateOfBirth) : null;
+
+  return (
+    <div className="grid gap-4 lg:grid-cols-2">
+      <Card className="card-pad border-brand-200 bg-brand-50/40">
+        <Badge tone="brand">Step one</Badge>
+        <h2 className="card-title mt-3">Tell Mama Care where you are</h2>
+        <p className="mt-2 text-sm leading-relaxed text-ink-700">
+          Enter the first day of your last period, or your due date from a scan or clinic card. That single date drives the
+          weekly guide, the appointment suggestions and the reminders — and you can correct it later.
+        </p>
+        <ul className="checklist mt-3">
+          <li>Not sure of your dates? Skip them and add them after your next visit.</li>
+          <li>Already had your baby? Add the baby instead — the app switches to Mother &amp; Baby mode.</li>
+        </ul>
+        <div className="mt-4 flex flex-wrap gap-2">
+          <Link to="/app/pregnancy" className="btn btn-primary btn-sm">
+            Set up my pregnancy
+          </Link>
+          <Link to="/app/baby" className="btn btn-secondary btn-sm">
+            Add my baby
+          </Link>
+        </div>
+      </Card>
+
+      <div className="space-y-4">
+        <Card className="card-pad">
+          <h2 className="card-title">What you can use right now</h2>
+          <p className="mt-1 text-sm text-ink-600">
+            These do not need your dates, so start with whichever is useful today.
+          </p>
+          <div className="mt-3 grid gap-2">
+            {[
+              { to: '/app/learn', label: 'Education library', detail: 'Pregnancy, labour, postnatal, newborn and breastfeeding' },
+              { to: '/app/emergency', label: 'Warning signs & emergency numbers', detail: 'What means go now, and what means be seen today' },
+              { to: '/app/facilities', label: 'Find a facility', detail: 'Maternity services, hours and how to get there' },
+              { to: '/app/reminders', label: 'Medication reminders', detail: 'Only what a clinician has prescribed' },
+            ].map((item) => (
+              <Link key={item.to} to={item.to} className="flex items-center justify-between gap-3 rounded-lg border border-ink-200 px-3 py-2.5 hover:border-brand-300">
+                <span className="min-w-0">
+                  <span className="block text-sm font-semibold text-ink-800">{item.label}</span>
+                  <span className="block truncate text-xs text-ink-500">{item.detail}</span>
+                </span>
+                <ChevronRight className="size-4 shrink-0 text-ink-400" aria-hidden />
+              </Link>
+            ))}
+          </div>
+        </Card>
+
+        {babyAge ? (
+          <Card className="card-pad">
+            <h2 className="card-title">Baby already added</h2>
+            <p className="mt-1 text-sm text-ink-600">
+              {activeBaby?.name} is {babyAge.months} month{babyAge.months === 1 ? '' : 's'} old. Open the baby record for
+              growth notes and the immunization card.
+            </p>
+            <div className="mt-3">
+              <Link to="/app/baby" className="btn btn-secondary btn-sm">
+                Open baby record
+              </Link>
+            </div>
+          </Card>
+        ) : null}
+
+        <EmptyState
+          title="Nothing is shared with anyone yet"
+          description="You can link a provider or invite a partner later, from Settings. Until you do, this record is visible only to you."
+        />
+      </div>
+    </div>
   );
 }

@@ -1,16 +1,16 @@
 /**
  * Firebase client bootstrap.
  *
- * Configuration comes exclusively from `VITE_FIREBASE_*` environment variables
- * (the public Web SDK config). Nothing here contains a service account, an API
- * secret, or an FCM registration token — privileged work is delegated to the
- * API service, which verifies the ID token minted here.
+ * Configuration comes from `VITE_FIREBASE_*` environment variables (the public Web
+ * SDK config), with the project's own values committed as defaults so a fresh clone
+ * runs. Nothing here contains a service account or an API secret: this build has no
+ * backend of its own, so authorisation is enforced by `firestore.rules` and
+ * `storage.rules` against the token minted here.
  */
 
 import { getApp, getApps, initializeApp, type FirebaseApp } from 'firebase/app';
 import { getAuth, browserLocalPersistence, browserSessionPersistence, setPersistence, type Auth } from 'firebase/auth';
 import { getFirestore, type Firestore } from 'firebase/firestore';
-import { getFunctions, type Functions } from 'firebase/functions';
 import { AppError } from '@/lib/errors';
 import { firebase as firebaseEnv, integrations } from '@/config/env';
 
@@ -19,7 +19,6 @@ export const isFirebaseConfigured = (): boolean => integrations.firebase.configu
 let app: FirebaseApp | null = null;
 let authRef: Auth | null = null;
 let dbRef: Firestore | null = null;
-let functionsRef: Functions | null = null;
 
 export function getFirebaseApp(): FirebaseApp {
   if (!isFirebaseConfigured()) {
@@ -42,15 +41,6 @@ export function getFirebaseAuth(): Auth {
 export function getDb(): Firestore {
   if (!dbRef) dbRef = getFirestore(getFirebaseApp());
   return dbRef;
-}
-
-export function getFns(): Functions {
-  if (!functionsRef) {
-    const instance = getFirebaseApp();
-    const region = (import.meta.env?.VITE_FUNCTIONS_REGION as string | undefined) || 'us-central1';
-    functionsRef = getFunctions(instance, region);
-  }
-  return functionsRef;
 }
 
 /**

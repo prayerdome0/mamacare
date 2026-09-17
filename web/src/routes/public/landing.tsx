@@ -1,543 +1,388 @@
+/**
+ * Landing page.
+ *
+ * The public front door: what the platform is, who it is for, the promise it makes
+ * (track, remember, learn, prepare, continue after birth) and the boundary it never
+ * crosses (it is not a doctor). Everything below the fold is reachable without an
+ * account, because a woman looking for pregnancy information should not have to
+ * register first.
+ */
+
 import { Link } from 'react-router-dom';
 import {
-  ArrowRight,
-  BadgeCheck,
-  CalendarClock,
-  ClipboardList,
-  FileSearch,
-  Fingerprint,
-  HeartPulse,
-  LifeBuoy,
+  Baby,
+  Bell,
+  BookOpen,
+  CalendarDays,
+  Globe2,
+  Heart,
+  Hospital,
   Lock,
-  Phone,
+  MapPin,
+  MessageCircle,
+  NotebookPen,
+  PhoneCall,
+  Pill,
   ShieldCheck,
   Stethoscope,
-  Users,
+  Syringe,
+  WifiOff,
 } from 'lucide-react';
-import { PublicSection, PublicShell } from '@/components/layout/public-shell';
+import { SITE, MEDICAL_DISCLAIMER } from '@/config/site-content';
+import { weekGuide } from '@/config/weekly-guide';
+import { SCHEDULE_LABEL, ZAMBIA_IMMUNIZATION_SCHEDULE } from '@/config/immunization';
+import { LANGUAGES } from '@/types/domain';
 import { AppImage } from '@/components/media/app-image';
 import { ButtonLink } from '@/components/ui/button';
+import { Card, SectionHeading } from '@/components/ui/card';
 import { Badge } from '@/components/ui/display';
-import { ABOUT, EMERGENCY_CONTACTS, MATERNAL_HEALTH, PUBLIC_DANGER_SIGNS, SERVICES, SITE, STATS } from '@/config/site-content';
-import { useHashScroll } from '@/routes/guards';
-import { useSession } from '@/providers/app-providers';
-import { telHref } from '@/lib/utils';
-import { FaqList } from '@/routes/public/faq';
-import { ContactForm } from '@/routes/public/contact-form';
-import { LiveStats } from '@/routes/public/live-stats';
+import { PublicHero } from '@/components/layout/public-shell';
 
-export default function LandingPage() {
-  useHashScroll();
-  const { actor } = useSession();
+const FEATURES = [
+  { icon: Heart, title: 'Pregnancy tracker', body: 'Enter your last period or your due date and see your current week, trimester and how long to go — always labelled as an estimate.' },
+  { icon: BookOpen, title: 'Weekly guide', body: 'Forty-two weeks of plain-language guidance: your baby, your body, what to ask your provider, healthy habits and warning signs.' },
+  { icon: CalendarDays, title: 'Appointment reminders', body: 'Record antenatal, postnatal and baby appointments, keep your questions ready, and get told the day before.' },
+  { icon: Pill, title: 'Medication reminders', body: 'Repeat exactly what your clinician prescribed, at the times they gave you. Mama Care never suggests a medicine or a dose.' },
+  { icon: Baby, title: 'Baby & immunization', body: 'After birth the app switches to Mother & Baby mode: baby profile, growth, development milestones and the national vaccine schedule.' },
+  { icon: NotebookPen, title: 'Private journal', body: 'Appointment notes, questions, milestones and how you feel. Yours alone — a provider on your care team still cannot read it.' },
+  { icon: Hospital, title: 'Facility directory', body: 'Search hospitals, clinics, maternity homes and pharmacies, sorted by distance, with directions and the services each one offers.' },
+  { icon: PhoneCall, title: 'Warning signs, one tap away', body: 'A red button on every screen, with what to look for, how fast to act, and who to call.' },
+  { icon: Stethoscope, title: 'Provider portal', body: 'Clinicians see only the patients who have shared their care with them — appointments, observations and notes, with an audit trail.' },
+  { icon: MessageCircle, title: 'Family support', body: 'Invite a partner or relative to selected reminders. You choose what they see, and you can revoke it at any time.' },
+  { icon: Bell, title: 'Notifications you control', body: 'Appointments, reminders, education and milestones — with quiet hours so nothing wakes you at 3am.' },
+  { icon: WifiOff, title: 'Works offline', body: 'Downloaded education, your pregnancy progress, saved appointments, reminders and baby information stay available without a connection.' },
+];
+
+const PROBLEMS = [
+  'Forgetting antenatal appointments',
+  'Not knowing what to expect at each stage',
+  'Pregnancy information scattered across cards and notes',
+  'Limited access to reliable maternal-health education',
+  'Forgetting medication or supplement schedules',
+  'Losing track of important dates',
+  'No convenient way to reach a healthcare provider',
+  'Postnatal and newborn information that stops at delivery',
+];
+
+const PHASES = [
+  {
+    step: '01',
+    title: 'Pregnancy mode',
+    body: 'Week-by-week guidance, appointments, reminders, observations from your visits and a journal for your questions.',
+    image: 'antenatal-consultation' as const,
+  },
+  {
+    step: '02',
+    title: 'Preparing for birth',
+    body: 'A birth plan, what to pack, how to tell labour has started, and when to leave for the facility.',
+    image: 'midwife' as const,
+  },
+  {
+    step: '03',
+    title: 'Mother & Baby mode',
+    body: 'Record the birth and the app changes: recovery, breastfeeding, newborn care, growth and the immunization schedule.',
+    image: 'mother-newborn' as const,
+  },
+];
+
+export default function Landing() {
+  const sample = weekGuide(24);
 
   return (
-    <PublicShell>
-      {/* ── Hero ─────────────────────────────────────────────────────── */}
-      <section className="relative overflow-hidden bg-white">
-        <div className="grid-fade pointer-events-none absolute inset-x-0 top-0 h-[520px] opacity-70" aria-hidden />
-        <div className="shell relative grid items-center gap-10 py-12 lg:grid-cols-[1.05fr_0.95fr] lg:py-20">
-          <div className="max-w-2xl">
-            <Badge tone="brand" icon={<BadgeCheck className="size-3.5" aria-hidden />}>
-              Antenatal records · alerts · referrals · reminders
-            </Badge>
-            <h1 className="display mt-4">Better Maternal Care. Connected.</h1>
-            <p className="lede mt-5 max-w-xl">
-              MAMA CARE gives a clinic one structured record for every pregnancy — observations captured the same way at each visit, alerts
-              that point to the assessment a finding requires, referrals that arrive complete, and mothers who can see their own next
-              appointment.
-            </p>
-            {/* The first action for a visitor is to look around. Registration is
-                offered, never required: this page is the front door, not a gate. */}
-            <div className="mt-7 flex flex-wrap items-center gap-3">
-              {actor ? (
-                <ButtonLink
-                  to={actor.role === 'MOTHER' ? '/home' : actor.role === 'ADMIN' ? '/admin' : '/app'}
-                  size="lg"
-                  icon={<ArrowRight className="size-4" aria-hidden />}
-                >
-                  Open your workspace
-                </ButtonLink>
-              ) : (
-                <ButtonLink to="/services" size="lg" icon={<ArrowRight className="size-4" aria-hidden />}>
-                  See what the platform does
-                </ButtonLink>
-              )}
-              {!actor ? (
-                <>
-                  <ButtonLink to="/register" variant="secondary" size="lg">
-                    Create an account
-                  </ButtonLink>
-                  <Link to="/signin" className="btn btn-ghost btn-lg">
-                    Sign in
-                  </Link>
-                </>
-              ) : (
-                <ButtonLink to="/maternal-health" variant="secondary" size="lg">
-                  Maternal health guidance
-                </ButtonLink>
-              )}
-              <Link to="/emergency" className="inline-flex items-center gap-1.5 text-[0.84rem] font-semibold text-[var(--color-risk-red-text)] hover:underline">
-                <LifeBuoy className="size-4" aria-hidden />
-                Emergency guidance
-              </Link>
-            </div>
-            <dl className="mt-9 grid max-w-lg grid-cols-2 gap-x-6 gap-y-4 border-t border-ink-200 pt-6 sm:grid-cols-4">
-              {STATS.map((stat) => (
-                <div key={stat.label}>
-                  <dt className="text-2xl font-bold tracking-tight text-brand-800 tnum">{stat.value}</dt>
-                  <dd className="mt-1 text-[0.72rem] leading-snug text-ink-500">{stat.label}</dd>
-                </div>
-              ))}
-            </dl>
-          </div>
-
-          <div className="relative">
-            <AppImage
-              name="hero"
-              ratio="4 / 3"
-              priority
-              overlay="gradient"
-              sizes="(max-width: 1024px) 100vw, 560px"
-              className="shadow-[var(--shadow-pop)]"
-            />
-            <figcaption className="caption absolute right-3 bottom-3 left-3 text-right text-white/85">
-              A midwife reviewing an antenatal record with an accompanying family member.
-            </figcaption>
-            <div className="card absolute -bottom-6 -left-2 hidden w-64 p-3.5 backdrop-blur sm:block lg:-left-10">
-              <p className="micro mb-2">Today at this facility</p>
-              <ul className="space-y-2">
-                <PreviewRow tone="red" title="BP 168/112 at 33 weeks" detail="Red alert · immediate assessment" />
-                <PreviewRow tone="amber" title="Fundal height −3 cm" detail="Amber alert · review within 1 week" />
-                <PreviewRow tone="green" title="18 appointments" detail="2 overdue · reminders sent" />
-              </ul>
-              <p className="caption mt-2.5 border-t border-ink-200 pt-2">
-                Illustrative of the workflow only. No patient data is shown on this site.
-              </p>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* ── Live platform statistics ─────────────────────────────────── */}
-      <section className="border-y border-ink-200 bg-white py-10 sm:py-12">
-        <div className="shell">
-          <div className="mb-6 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-            <div>
-              <p className="section-eyebrow">This deployment, counted</p>
-              <h2 className="display-2 mt-1">What the platform is holding right now</h2>
-            </div>
-            <p className="muted max-w-md text-[0.88rem]">
-              Counts are read from the database as the page loads. Nothing on this site is a placeholder number.
-            </p>
-          </div>
-          <LiveStats />
-        </div>
-      </section>
-
-      {/* ── About ────────────────────────────────────────────────────── */}
-      <PublicSection
-        id="about"
-        tone="tint"
-        eyebrow="About MAMA CARE"
-        title="A pregnancy record that survives the next visit"
-        description={ABOUT.approach}
-        actions={
-          <ButtonLink to="/about" variant="secondary" size="sm">
-            More about the platform
-          </ButtonLink>
-        }
+    <>
+      <PublicHero
+        eyebrow="Pregnancy, mother & baby care"
+        title="Every mother. Every journey."
+        lede="Mama Care helps you track your pregnancy, keep every antenatal appointment, remember what your clinician prescribed, learn week by week, and carry on with your baby after birth — in one simple, private place."
+        image={<AppImage name="hero" alt="A pregnant woman at an antenatal care visit" ratio="4 / 3" priority />}
       >
-        <div className="grid gap-8 lg:grid-cols-[0.95fr_1.05fr]">
-          <div className="space-y-4">
-            <AppImage name="aboutPlatform" ratio="16 / 10" caption="Clinic overview: alerts, attendance and coverage counted from stored records." />
-            <div className="card p-5">
-              <h3 className="h3 flex items-center gap-2">
-                <ShieldCheck className="size-4 text-brand-700" aria-hidden />
-                Clinical governance first
-              </h3>
-              <p className="muted mt-2">{ABOUT.governance}</p>
-            </div>
-          </div>
+        <ButtonLink to="/register" size="lg">
+          Create a free account
+        </ButtonLink>
+        <ButtonLink to="/learn" variant="secondary" size="lg">
+          Read the education library
+        </ButtonLink>
+        <span className="inline-flex items-center gap-1.5 self-center text-xs text-ink-500">
+          <Lock className="size-3.5" aria-hidden />
+          No card needed · Built for Zambia · Works offline
+        </span>
+      </PublicHero>
+
+      {/* The problem, stated plainly */}
+      <section className="shell py-14">
+        <div className="grid gap-10 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
           <div>
-            <p className="prose-mamacare">{ABOUT.problem}</p>
-            <ul className="mt-6 grid gap-3 sm:grid-cols-2">
-              {ABOUT.principles.map((principle) => (
-                <li key={principle.title} className="card p-4">
-                  <p className="text-[0.88rem] font-semibold text-ink-900">{principle.title}</p>
-                  <p className="muted mt-1.5">{principle.detail}</p>
-                </li>
-              ))}
-            </ul>
-            <div className="mt-5 flex flex-wrap gap-2">
-              <Link to="/maternal-health" className="chip">
-                Maternal health evidence <ArrowRight className="size-3.5" aria-hidden />
-              </Link>
-              <Link to="/privacy" className="chip">
-                Privacy and data handling <ArrowRight className="size-3.5" aria-hidden />
-              </Link>
-            </div>
-          </div>
-        </div>
-      </PublicSection>
-
-      {/* ── Services ─────────────────────────────────────────────────── */}
-      <PublicSection
-        id="services"
-        eyebrow="Services"
-        title="What the platform does at each step of care"
-        description="Six capabilities that replace the paper card, the referral slip and the appointment book — on one record, with permissions enforced where the data lives."
-        actions={
-          <>
-            <ButtonLink to="/services" variant="secondary" size="sm">
-              All services
-            </ButtonLink>
-            <ButtonLink to="/register" variant="secondary" size="sm">
-              Set up your facility
-            </ButtonLink>
-          </>
-        }
-      >
-        <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
-          {SERVICES.map((service) => (
-            <article key={service.key} className="card group flex flex-col overflow-hidden">
-              <AppImage name={service.image} ratio="16 / 9" rounded={false} className="overflow-hidden" />
-              <div className="flex flex-1 flex-col p-5">
-                <h3 className="h3">{service.title}</h3>
-                <p className="muted mt-2 flex-1">{service.summary}</p>
-                <ul className="mt-4 space-y-1.5 border-t border-ink-100 pt-4">
-                  {service.bullets.map((bullet) => (
-                    <li key={bullet} className="flex items-start gap-2 text-[0.8rem] leading-snug text-ink-600">
-                      <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-brand-500" aria-hidden />
-                      {bullet}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            </article>
-          ))}
-        </div>
-      </PublicSection>
-
-      {/* ── Workflow ─────────────────────────────────────────────────── */}
-      <PublicSection
-        tone="ink"
-        eyebrow="How a visit runs"
-        title="Booking to follow-up, in one continuous record"
-        actions={
-          <ButtonLink to="/how-it-works" variant="white" size="sm">
-            The full lifecycle
-          </ButtonLink>
-        }
-      >
-        <div className="grid gap-4 lg:grid-cols-4">
-          {[
-            { icon: <Users className="size-4" aria-hidden />, step: '01', title: 'Register', body: 'Unique patient ID, consent, dating, contact and community health worker. Gestational age and due date are calculated, never typed as the key.', image: 'communityWorker' as const },
-            { icon: <Stethoscope className="size-4" aria-hidden />, step: '02', title: 'Assess', body: 'Structured observations plus the thirteen danger signs, each with an explicit “none reported” confirmation.', image: 'ancConsultation' as const },
-            { icon: <FileSearch className="size-4" aria-hidden />, step: '03', title: 'Act', body: 'Alerts with their evidence, referral packets with a receipt and outcome, investigations documented on the visit.', image: 'screening' as const },
-            { icon: <CalendarClock className="size-4" aria-hidden />, step: '04', title: 'Follow up', body: 'Next appointment booked before she leaves, reminders on the mother’s device, missed visits raised for outreach.', image: 'appointmentCheckin' as const },
-          ].map((item) => (
-            <article key={item.step} className="flex flex-col overflow-hidden rounded-[var(--radius-card)] border border-white/12 bg-white/[0.045]">
-              <AppImage name={item.image} ratio="16 / 9" rounded={false} />
-              <div className="flex flex-1 flex-col p-4">
-                <div className="flex items-center gap-2 text-brand-300">
-                  {item.icon}
-                  <span className="micro text-brand-200/80">Step {item.step}</span>
-                </div>
-                <h3 className="mt-2 text-[1rem] font-semibold text-white">{item.title}</h3>
-                <p className="mt-1.5 text-[0.82rem] leading-relaxed text-brand-100/75">{item.body}</p>
-              </div>
-            </article>
-          ))}
-        </div>
-      </PublicSection>
-
-      {/* ── Field gallery ─────────────────────────────────────────────── */}
-      <PublicSection
-        eyebrow="In the field"
-        title="The journey the record follows"
-        description="Registration, investigations, referral and follow-up happen in rooms and on roads like these — the moments the MAMA CARE record is built from, from the dating scan to the day-one weight check and the visit that reaches a mother at home."
-      >
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          <AppImage
-            name="referralTransport"
-            ratio="16 / 9"
-            className="md:col-span-2"
-            sizes="(max-width: 768px) 100vw, (max-width: 1280px) 100vw, 640px"
-            caption="A referral leaves complete: escort, transport and the receiving facility told she is coming."
-          />
-          <AppImage name="mobileReminder" ratio="4 / 3" caption="Appointment reminders reach the mother on her own phone." />
-          <AppImage name="obstetricUltrasound" ratio="4 / 3" caption="Dating and growth scans documented on the visit they happened." />
-          <AppImage name="laboratoryTesting" ratio="4 / 3" caption="Haemoglobin, malaria and syphilis screening on site, not on a slip of paper." />
-          <AppImage name="newbornWeighing" ratio="4 / 3" caption="The day-one weight check, on the same record as the pregnancy." />
-          <AppImage
-            name="outreachVisit"
-            ratio="21 / 9"
-            className="md:col-span-2 xl:col-span-3"
-            sizes="(max-width: 768px) 100vw, 1200px"
-            caption="Community follow-up where the road ends — a missed visit is raised for outreach, not forgotten."
-          />
-        </div>
-        <p className="caption mt-5">
-          Illustrative photography for this deployment. No patient data is shown, and no image depicts a real patient or a real record.
-        </p>
-      </PublicSection>
-
-      {/* ── Maternal health information ──────────────────────────────── */}
-      <PublicSection
-        id="maternal-health"
-        eyebrow="Maternal health"
-        title="What good antenatal care looks like — and what to watch for"
-        description={MATERNAL_HEALTH.intro}
-        actions={
-          <ButtonLink to="/maternal-health" variant="secondary" size="sm" icon={<ArrowRight className="size-4" aria-hidden />}>
-            Read the full guidance
-          </ButtonLink>
-        }
-      >
-        <div className="grid gap-6 lg:grid-cols-[1fr_0.85fr]">
-          <div className="space-y-3">
-            {MATERNAL_HEALTH.who.slice(0, 4).map((item) => (
-              <article key={item.title} className="card p-4.5">
-                <h3 className="h3 flex items-start gap-2">
-                  <HeartPulse className="mt-0.5 size-4 shrink-0 text-brand-700" aria-hidden />
-                  {item.title}
-                </h3>
-                <p className="muted mt-1.5">{item.body}</p>
-              </article>
-            ))}
-          </div>
-          <div className="card overflow-hidden">
-            <div className="border-b border-ink-200 bg-[var(--color-risk-red-soft)] px-5 py-4">
-              <h3 className="h3 flex items-center gap-2 text-[var(--color-risk-red-text)]">
-                <ClipboardList className="size-4" aria-hidden />
-                Seek assessment today if you notice
-              </h3>
-              <p className="muted mt-1">These are recognised warning signs in pregnancy. They are not a diagnosis — they mean an examination is needed.</p>
-            </div>
-            <ul className="divide-y divide-ink-100">
-              {PUBLIC_DANGER_SIGNS.slice(0, 8).map((sign) => (
-                <li key={sign.key} className="flex items-start gap-2.5 px-5 py-2.5">
-                  <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-[var(--color-risk-red)]" aria-hidden />
-                  <span className="min-w-0">
-                    <span className="block text-[0.86rem] font-semibold text-ink-900">{sign.title}</span>
-                    <span className="mt-0.5 block text-[0.78rem] leading-snug text-ink-500">{sign.detail}</span>
-                  </span>
-                </li>
-              ))}
-            </ul>
-            <div className="border-t border-ink-200 px-5 py-4">
-              <Link to="/emergency" className="inline-flex items-center gap-1.5 text-[0.84rem] font-semibold text-brand-800 hover:underline">
-                Emergency guidance and numbers
-                <ArrowRight className="size-3.5" aria-hidden />
-              </Link>
-            </div>
-          </div>
-        </div>
-      </PublicSection>
-
-      {/* ── Emergency guidance band ──────────────────────────────────── */}
-      <section id="emergency" className="scroll-mt-24 border-y border-[var(--color-risk-red-border)] bg-[var(--color-risk-red-soft)] py-11">
-        <div className="shell grid gap-6 lg:grid-cols-[1fr_auto] lg:items-center">
-          <div>
-            <p className="section-eyebrow !text-[var(--color-risk-red-text)]">Emergency</p>
-            <h2 className="display-2 mt-2">If labour is obstructed, she is bleeding heavily or has a fit</h2>
-            <p className="lede mt-3 max-w-2xl">
-              Move the mother to a facility now, with a companion and her antenatal record or phone. Do not wait for an appointment, and do
-              not wait for a reply to a message.
+            <SectionHeading eyebrow="Why Mama Care exists" title="Pregnancy is full of things to remember" />
+            <p className="lede mt-4">
+              Most mothers are not struggling for lack of care. They are struggling to hold it all together: dates,
+              doses, questions, and information they were given once, quickly, in a busy clinic.
             </p>
-            <p className="muted mt-3 max-w-2xl">{EMERGENCY_CONTACTS.note}</p>
+            <p className="mt-3 text-sm leading-relaxed text-ink-600">
+              Mama Care puts all of it in one place you can open on a phone, offline, at 2am, without asking anyone.
+            </p>
           </div>
-          <ul className="grid gap-2 sm:grid-cols-2 lg:w-[330px] lg:grid-cols-1">
-            {EMERGENCY_CONTACTS.lines.map((line) => (
-              <li key={line.label}>
-                <a
-                  href={telHref(line.number)}
-                  className="card flex items-center justify-between gap-3 px-4 py-3 transition-shadow hover:shadow-[var(--shadow-pop)]"
-                >
-                  <span className="text-[0.8rem] font-medium text-ink-600">{line.label}</span>
-                  <span className="inline-flex items-center gap-1.5 text-[0.95rem] font-bold text-ink-900 tnum">
-                    <Phone className="size-3.5 text-[var(--color-risk-red)]" aria-hidden />
-                    {line.number}
-                  </span>
-                </a>
+          <ul className="grid gap-2.5 sm:grid-cols-2">
+            {PROBLEMS.map((problem) => (
+              <li key={problem} className="card flex items-start gap-2.5 p-4 text-[0.9rem] text-ink-700">
+                <span className="mt-1.5 size-2 shrink-0 rounded-full bg-brand-500" aria-hidden />
+                {problem}
               </li>
             ))}
           </ul>
         </div>
       </section>
 
-      {/* ── Roles ────────────────────────────────────────────────────── */}
-      <PublicSection
-        tone="tint"
-        eyebrow="Who uses it"
-        title="One record, six sets of permissions"
-        actions={
-          <>
-            <ButtonLink to="/for-clinics" variant="secondary" size="sm">
-              For clinics
-            </ButtonLink>
-            <ButtonLink to="/for-mothers" variant="secondary" size="sm">
-              For mothers
-            </ButtonLink>
-          </>
-        }
-      >
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          <RoleCard
-            title="Administrator"
-            body="Approves health-worker accounts, sets facility configuration, reviews audit logs, and edits clinical thresholds — which are then marked as awaiting clinical sign-off."
-            permissions={['User approval and roles', 'Facility and system settings', 'Audit log review']}
-            image="clinicEnvironment"
-          />
-          <RoleCard
-            title="Facility supervisor"
-            body="Sees the whole facility roster, workloads and coverage; manages staff assignment, education content and alert response, and signs off reports."
-            permissions={['Facility-wide records', 'Staff assignment', 'Reports and education']}
-            image="midwifeConsultation"
-          />
-          <RoleCard
-            title="Midwife and nurse"
-            body="Registers mothers, records ANC visits, responds to alerts, creates referrals and schedules the next appointment before the mother leaves."
-            permissions={['Full clinical entry', 'Alert response', 'Referrals and documents']}
-            image="ancConsultation"
-          />
-          <RoleCard
-            title="Community health worker"
-            body="Sees the mothers in their catchment, records outreach and home visits, follows up missed appointments, and can prepare a referral for the clinic to sign."
-            permissions={['Catchment roster', 'Follow-up notes', 'Referral drafting']}
-            image="communityWorker"
-          />
-          <RoleCard
-            title="Mother (patient account)"
-            body="Her own dates, appointments, results, reports and education. She can report a danger sign from home, which raises an alert for her facility."
-            permissions={['Own record only', 'Appointment reminders', 'Report a symptom']}
-            image="motherNewborn"
-          />
-          <RoleCard
-            title="Receiving facility"
-            body="Sees the referred mother’s summary while the referral is open, records arrival, assessment and outcome, and closes the loop."
-            permissions={['Referral packet', 'Outcome entry', 'Closure note']}
-            image="screening"
-          />
-        </div>
-      </PublicSection>
-
-      {/* ── Security ─────────────────────────────────────────────────── */}
-      <PublicSection
-        eyebrow="Security and privacy"
-        title="Permissions live with the data, not with the menu"
-        description="The interface only hides what you cannot do. The enforcement happens in database security rules against the authenticated token, and every privileged action is written to an append-only audit log."
-      >
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-          {[
-            { icon: <Lock className="size-4" aria-hidden />, title: 'No secrets in the browser', body: 'The client holds only public configuration. Upload presets, the SMS key and any privileged write happen on the server; API secrets are never shipped to the app.' },
-            { icon: <Fingerprint className="size-4" aria-hidden />, title: 'Roles from verified claims', body: 'Roles come from authentication claims and are checked again against the user profile. A sign-up can never choose administrator for itself.' },
-            { icon: <ShieldCheck className="size-4" aria-hidden />, title: 'Row-level access', body: 'Staff read records at their facility; a mother reads only her own; reports and documents carry an explicit access list enforced on read.' },
-            { icon: <FileSearch className="size-4" aria-hidden />, title: 'Private files stay private', body: 'Reports and clinical documents are uploaded with a non-public access mode and opened through short-lived signed URLs, never a guessable public link.' },
-          ].map((item) => (
-            <article key={item.title} className="card p-5">
-              <span className="grid size-9 place-items-center rounded-lg bg-brand-50 text-brand-800">{item.icon}</span>
-              <h3 className="mt-3 text-[0.94rem] font-semibold text-ink-900">{item.title}</h3>
-              <p className="muted mt-1.5">{item.body}</p>
-            </article>
-          ))}
-        </div>
-      </PublicSection>
-
-      {/* ── FAQ ──────────────────────────────────────────────────────── */}
-      <PublicSection tone="tint" eyebrow="Questions" title="Before your facility adopts it">
-        <FaqList />
-      </PublicSection>
-
-      {/* ── Contact ──────────────────────────────────────────────────── */}
-      <PublicSection
-        id="contact"
-        eyebrow="Contact"
-        title="Talk to us about deploying MAMA CARE"
-        description="Tell us about your facility and what you need to change. We reply with an implementation plan, the configuration required, and a clinical sign-off checklist."
-      >
-        <div className="grid gap-6 lg:grid-cols-[0.9fr_1.1fr]">
-          <div className="space-y-4">
-            <AppImage name="clinicEnvironment" ratio="16 / 10" caption="Reception and records area at a typical urban health post." />
-            <div className="card p-5">
-              <h3 className="h3">Direct</h3>
-              <dl className="mt-3 space-y-2.5 text-[0.86rem]">
-                <div>
-                  <dt className="micro">Email</dt>
-                  <dd className="font-medium text-ink-800">
-                    <a href={`mailto:${SITE.org.email}`} className="hover:underline">{SITE.org.email}</a>
-                  </dd>
-                </div>
-                <div>
-                  <dt className="micro">Telephone</dt>
-                  <dd className="font-medium text-ink-800 tnum">
-                    <a href={telHref(SITE.org.phone)} className="hover:underline">{SITE.org.phone}</a>
-                  </dd>
-                </div>
-                <div>
-                  <dt className="micro">Office</dt>
-                  <dd className="text-ink-600">{SITE.org.address}</dd>
-                </div>
-                <div>
-                  <dt className="micro">Hours</dt>
-                  <dd className="text-ink-600">{SITE.org.hours}</dd>
-                </div>
-                <div>
-                  <dt className="micro">Data protection queries</dt>
-                  <dd className="font-medium text-ink-800">
-                    <a href={`mailto:${SITE.privacyContact}`} className="hover:underline">{SITE.privacyContact}</a>
-                  </dd>
-                </div>
-              </dl>
+      {/* Sample of the weekly guide */}
+      <section className="border-y border-ink-200 bg-ink-50">
+        <div className="shell grid items-center gap-10 py-14 lg:grid-cols-2">
+          <div>
+            <SectionHeading eyebrow="Week by week" title="Your guide for every week of pregnancy" />
+            <p className="lede mt-4">
+              Forty-two weeks, each with the same five sections: your baby, your body, things to discuss with your
+              healthcare provider, healthy habits, and the warning signs that matter at that stage.
+            </p>
+            <div className="mt-6">
+              <ButtonLink to="/learn" variant="secondary">
+                Browse the library
+              </ButtonLink>
             </div>
           </div>
-          <div className="card p-5 sm:p-6">
-            <ContactForm />
+
+          <Card className="card-pad">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="micro">Week {sample.week}</p>
+                <h3 className="mt-1 text-lg font-bold text-ink-900">{sample.size}</h3>
+              </div>
+              <Badge tone="brand">{sample.trimester === 1 ? 'First' : sample.trimester === 2 ? 'Second' : 'Third'} trimester</Badge>
+            </div>
+
+            <dl className="mt-5 space-y-4 text-sm">
+              <div>
+                <dt className="font-semibold text-ink-900">Your baby</dt>
+                <dd className="mt-1 leading-relaxed text-ink-600">{sample.baby}</dd>
+              </div>
+              <div>
+                <dt className="font-semibold text-ink-900">Your body</dt>
+                <dd className="mt-1 leading-relaxed text-ink-600">{sample.body}</dd>
+              </div>
+              <div>
+                <dt className="font-semibold text-ink-900">Healthy habits</dt>
+                <dd className="mt-1">
+                  <ul className="space-y-1 text-ink-600">
+                    {sample.habits.slice(0, 3).map((habit) => (
+                      <li key={habit} className="flex items-start gap-2">
+                        <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-brand-500" aria-hidden />
+                        {habit}
+                      </li>
+                    ))}
+                  </ul>
+                </dd>
+              </div>
+            </dl>
+            <p className="mt-4 border-t border-ink-200 pt-3 text-xs text-ink-500">
+              Educational information only — never a diagnosis, never a replacement for your provider.
+            </p>
+          </Card>
+        </div>
+      </section>
+
+      {/* Features */}
+      <section className="shell py-14">
+        <SectionHeading eyebrow="What you can do" title="One app for pregnancy, birth and baby" />
+        <div className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {FEATURES.map((feature) => (
+            <Card key={feature.title} className="card-pad">
+              <feature.icon className="size-6 text-brand-700" aria-hidden />
+              <h3 className="mt-3 text-[0.98rem] font-semibold text-ink-900">{feature.title}</h3>
+              <p className="mt-1.5 text-[0.87rem] leading-relaxed text-ink-600">{feature.body}</p>
+            </Card>
+          ))}
+        </div>
+      </section>
+
+      {/* The journey */}
+      <section className="border-y border-ink-200 bg-ink-50">
+        <div className="shell py-14">
+          <SectionHeading eyebrow="From pregnancy to parenthood" title="The app changes as you do" />
+          <div className="mt-8 grid gap-5 lg:grid-cols-3">
+            {PHASES.map((phase) => (
+              <Card key={phase.step} className="overflow-hidden">
+                <AppImage name={phase.image} alt={phase.title} ratio="16 / 9" rounded={false} />
+                <div className="p-5">
+                  <p className="micro">{phase.step}</p>
+                  <h3 className="mt-1.5 text-[1.05rem] font-bold text-ink-900">{phase.title}</h3>
+                  <p className="mt-2 text-[0.88rem] leading-relaxed text-ink-600">{phase.body}</p>
+                </div>
+              </Card>
+            ))}
           </div>
         </div>
-      </PublicSection>
-    </PublicShell>
-  );
-}
+      </section>
 
-function PreviewRow({ tone, title, detail }: { tone: 'red' | 'amber' | 'green'; title: string; detail: string }) {
-  const dot = tone === 'red' ? 'bg-[var(--color-risk-red)]' : tone === 'amber' ? 'bg-[var(--color-risk-amber)]' : 'bg-[var(--color-risk-green)]';
-  return (
-    <li className="flex items-start gap-2">
-      <span className={`mt-1.5 size-2 shrink-0 rounded-full ${dot}`} aria-hidden />
-      <span className="min-w-0">
-        <span className="block truncate text-[0.78rem] font-semibold text-ink-800">{title}</span>
-        <span className="block truncate text-[0.72rem] text-ink-500">{detail}</span>
-      </span>
-    </li>
-  );
-}
+      {/* Immunization */}
+      <section className="shell py-14">
+        <div className="grid gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]">
+          <div>
+            <SectionHeading eyebrow="After birth" title="Never miss a vaccine date" />
+            <p className="lede mt-4">
+              Mama Care builds the national immunization schedule from your baby's date of birth and reminds you before
+              each visit. Bring the child health card, and the record stays complete.
+            </p>
+            <p className="mt-3 flex items-center gap-2 text-sm text-ink-600">
+              <Syringe className="size-4 text-brand-700" aria-hidden />
+              {SCHEDULE_LABEL} · {ZAMBIA_IMMUNIZATION_SCHEDULE.length} doses tracked
+            </p>
+            <div className="mt-5">
+              <ButtonLink to="/learn/immunization-why-it-matters" variant="secondary">
+                Why immunization matters
+              </ButtonLink>
+            </div>
+          </div>
+          <Card className="table-scroll">
+            <table className="table-base">
+              <thead>
+                <tr>
+                  <th scope="col">Age</th>
+                  <th scope="col">Vaccine</th>
+                  <th scope="col">Dose</th>
+                </tr>
+              </thead>
+              <tbody>
+                {ZAMBIA_IMMUNIZATION_SCHEDULE.slice(0, 10).map((item) => (
+                  <tr key={`${item.code}-${item.ageDays}`}>
+                    <td className="whitespace-nowrap font-medium text-ink-900">{item.ageLabel}</td>
+                    <td className="text-ink-700">{item.vaccine}</td>
+                    <td className="whitespace-nowrap text-ink-600">{item.dose}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="border-t border-ink-200 px-4 py-3 text-xs text-ink-500">
+              Only a health worker decides what your baby receives and when. Mama Care keeps the dates.
+            </p>
+          </Card>
+        </div>
+      </section>
 
-function RoleCard({
-  title,
-  body,
-  permissions,
-  image,
-}: {
-  title: string;
-  body: string;
-  permissions: string[];
-  image: 'clinicEnvironment' | 'midwifeConsultation' | 'ancConsultation' | 'communityWorker' | 'motherNewborn' | 'screening';
-}) {
-  return (
-    <article className="card flex flex-col overflow-hidden">
-      <AppImage name={image} ratio="16 / 8" rounded={false} />
-      <div className="flex flex-1 flex-col p-4.5">
-        <h3 className="h3">{title}</h3>
-        <p className="muted mt-1.5 flex-1">{body}</p>
-        <ul className="mt-3 flex flex-wrap gap-1.5">
-          {permissions.map((permission) => (
-            <li key={permission}>
-              <Badge tone="neutral">{permission}</Badge>
-            </li>
-          ))}
-        </ul>
-      </div>
-    </article>
+      {/* Safety + privacy */}
+      <section className="border-y border-ink-200 bg-brand-950 text-white">
+        <div className="shell grid gap-8 py-14 lg:grid-cols-2">
+          <div>
+            <p className="text-[0.72rem] font-semibold tracking-[0.16em] text-brand-200 uppercase">Our medical safety principle</p>
+            <h2 className="mt-3 text-2xl leading-tight font-bold sm:text-3xl">Mama Care never presents itself as a doctor</h2>
+            <p className="mt-4 text-[0.95rem] leading-relaxed text-white/85">{MEDICAL_DISCLAIMER}</p>
+            <div className="mt-6">
+              <ButtonLink to="/emergency" variant="danger">
+                See the warning signs
+              </ButtonLink>
+            </div>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            {[
+              { icon: ShieldCheck, title: 'Minimal data', body: 'You only give what a feature needs. No form asks for more.' },
+              { icon: Lock, title: 'Protected records', body: 'Firebase Authentication, role-based database rules and private storage for health documents.' },
+              { icon: Stethoscope, title: 'Care sharing you control', body: 'A provider sees your records only after you share your care, and only what that care needs.' },
+              { icon: Globe2, title: 'Your data, your call', body: 'Export your records, or delete your account and everything in it, from Settings.' },
+            ].map((item) => (
+              <div key={item.title} className="rounded-lg border border-white/15 bg-white/8 p-4">
+                <item.icon className="size-5 text-brand-200" aria-hidden />
+                <h3 className="mt-2.5 text-[0.95rem] font-semibold">{item.title}</h3>
+                <p className="mt-1 text-[0.82rem] leading-relaxed text-white/75">{item.body}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* For clinics + languages */}
+      <section className="shell grid gap-10 py-14 lg:grid-cols-2">
+        <Card className="card-pad">
+          <Stethoscope className="size-6 text-brand-700" aria-hidden />
+          <h3 className="mt-3 text-lg font-bold text-ink-900">For clinics and healthcare workers</h3>
+          <p className="mt-2 text-[0.9rem] leading-relaxed text-ink-600">
+            A separate portal with verified provider profiles, patient lists limited to people who shared their care,
+            appointment records, education you can publish for your own community, and an audit log of every privileged
+            action.
+          </p>
+          <ul className="mt-4 space-y-2 text-[0.88rem] text-ink-700">
+            {['Verified provider directory', 'Consent-based patient access', 'Structured appointment records', 'Publish reviewed education in your own words', 'Facility profile and services'].map((item) => (
+              <li key={item} className="flex items-start gap-2">
+                <ShieldCheck className="mt-0.5 size-4 shrink-0 text-brand-700" aria-hidden />
+                {item}
+              </li>
+            ))}
+          </ul>
+          <div className="mt-5 flex flex-wrap gap-2">
+            <ButtonLink to="/register?role=provider" variant="secondary">
+              Register as a provider
+            </ButtonLink>
+            <ButtonLink to="/contact" variant="ghost">
+              Talk to us about a partnership
+            </ButtonLink>
+          </div>
+        </Card>
+
+        <Card className="card-pad">
+          <MapPin className="size-6 text-brand-700" aria-hidden />
+          <h3 className="mt-3 text-lg font-bold text-ink-900">Built in Zambia, usable anywhere</h3>
+          <p className="mt-2 text-[0.9rem] leading-relaxed text-ink-600">
+            Zambian provinces, Zambian emergency short codes and the Zambian immunization schedule are the defaults.
+            Every country stays selectable, and the facility directory can be maintained for any market.
+          </p>
+          <div className="mt-4">
+            <p className="micro">Languages</p>
+            <ul className="mt-2 flex flex-wrap gap-2">
+              {LANGUAGES.map((language) => (
+                <li key={language.code}>
+                  <Badge tone={language.available ? 'green' : 'neutral'}>
+                    {language.label}
+                    {language.available ? '' : ' · planned'}
+                  </Badge>
+                </li>
+              ))}
+            </ul>
+            <p className="mt-2 text-xs text-ink-500">
+              Translations will be reviewed by qualified native speakers and maternal-health professionals before release.
+            </p>
+          </div>
+        </Card>
+      </section>
+
+      {/* Mission + vision */}
+      <section className="border-t border-ink-200 bg-ink-50">
+        <div className="shell grid gap-8 py-14 md:grid-cols-2">
+          <div>
+            <p className="micro">Mission</p>
+            <p className="mt-2 text-lg leading-relaxed font-medium text-ink-800">{SITE.mission}</p>
+          </div>
+          <div>
+            <p className="micro">Vision</p>
+            <p className="mt-2 text-lg leading-relaxed font-medium text-ink-800">{SITE.vision}</p>
+          </div>
+        </div>
+      </section>
+
+      {/* Final CTA */}
+      <section className="shell py-16">
+        <Card className="card-pad grid items-center gap-6 bg-brand-50 border-brand-200 lg:grid-cols-[minmax(0,1fr)_auto]">
+          <div>
+            <h2 className="display-2">Start your journey today</h2>
+            <p className="lede mt-2 max-w-xl">
+              Free to use. Set up your pregnancy in under a minute and your week-by-week guide, appointment reminders and
+              education library are ready immediately.
+            </p>
+          </div>
+          <div className="actions-wrap">
+            <ButtonLink to="/register" size="lg">
+              Get started
+            </ButtonLink>
+            <ButtonLink to="/sign-in" variant="secondary" size="lg">
+              Sign in
+            </ButtonLink>
+          </div>
+        </Card>
+      </section>
+    </>
   );
 }

@@ -2,36 +2,38 @@
  * Durable device storage for the offline provider.
  *
  * IndexedDB with one object store per collection, keyed by document id. It is a
- * real persistence layer (writes survive reload and app restart), not an
- * in-memory array: it exists so the platform is usable before Firebase project
- * credentials are attached, and so field teams keep working when the network is
- * down. Production deployments use the Firestore provider instead.
+ * real persistence layer — writes survive reload and app restart, not an
+ * in-memory array. It exists so Mama Care keeps working offline (downloaded
+ * education, pregnancy progress, saved appointments, reminders and baby
+ * information) and so a first run is usable before Firebase is provisioned.
  */
 
-const DB_NAME = 'mamacare-local';
-const DB_VERSION = 2;
+const DB_NAME = 'mamacare';
+const DB_VERSION = 10;
 
 export const STORES = [
   'users',
-  'facilities',
-  'mothers',
   'pregnancies',
-  'anc_visits',
+  'babies',
   'appointments',
-  'alerts',
-  'referrals',
-  'reports',
-  'documents',
-  'notifications',
-  'audit_logs',
-  'education',
-  'alert_rules',
-  'devices',
-  'facility_assignments',
-  'settings',
+  'reminders',
+  'observations',
+  'immunizations',
+  'journal',
+  'articles',
+  'facilities',
+  'providers',
   'messages',
+  'notifications',
+  'devices',
   'announcements',
-  'services',
+  'supporters',
+  'care_links',
+  'feedback',
+  'reports',
+  'audit_logs',
+  'settings',
+  'documents',
   'outbox',
   'blobs',
   'meta',

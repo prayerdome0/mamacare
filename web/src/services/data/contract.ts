@@ -1,99 +1,90 @@
+/**
+ * Storage contract.
+ *
+ * Two providers implement this interface: Firestore for a live deployment and an
+ * IndexedDB provider for offline / not-yet-provisioned use. No screen knows which
+ * one is active. The device provider enforces the same access policy that
+ * `firestore.rules` enforces in production, so behaviour is identical either way.
+ */
+
 import type {
   AccountStatus,
-  AlertRule,
-  AncVisit,
   Announcement,
   AppNotification,
   Appointment,
+  Article,
   AuditLogEntry,
-  Message,
-  ServiceOffering,
-  AuthClaims,
-  ClinicalAlert,
+  Baby,
+  CareLink,
+  ContentReport,
   DeviceToken,
   DocumentRecord,
-  EducationResource,
   Facility,
-  FacilityAssignment,
-  Mother,
+  Feedback,
+  HealthcareProvider,
+  ImmunizationRecord,
+  JournalEntry,
+  LanguageCode,
+  Message,
+  NotificationPreferences,
+  Observation,
   Pregnancy,
   QuerySpec,
-  Referral,
-  ReportRecord,
+  Reminder,
   Role,
+  SupporterLink,
   SystemSettings,
   UserProfile,
 } from '@/types/domain';
 
-/**
- * Storage contract.
- *
- * Both providers (Firestore for real deployments, the device provider for
- * offline / not-yet-configured environments) implement this interface, so no
- * screen knows or cares which one is active. Crucially the device provider
- * enforces the same access policy that `firestore.rules` enforces in
- * production: reads and writes travel *through* the policy layer instead of
- * trusting the caller.
- */
-
 export interface Collections {
   users: UserProfile;
-  facilities: Facility;
-  mothers: Mother;
   pregnancies: Pregnancy;
-  anc_visits: AncVisit;
+  babies: Baby;
   appointments: Appointment;
-  alerts: ClinicalAlert;
-  referrals: Referral;
-  reports: ReportRecord;
-  documents: DocumentRecord;
-  notifications: AppNotification;
-  audit_logs: AuditLogEntry;
-  education: EducationResource;
-  alert_rules: AlertRule;
+  reminders: Reminder;
+  observations: Observation;
+  immunizations: ImmunizationRecord;
+  journal: JournalEntry;
+  articles: Article;
+  facilities: Facility;
+  providers: HealthcareProvider;
   messages: Message;
-  announcements: Announcement;
-  services: ServiceOffering;
+  notifications: AppNotification;
   devices: DeviceToken;
-  facility_assignments: FacilityAssignment;
+  announcements: Announcement;
+  supporters: SupporterLink;
+  care_links: CareLink;
+  feedback: Feedback;
+  reports: ContentReport;
+  audit_logs: AuditLogEntry;
   settings: SystemSettings;
+  documents: DocumentRecord;
 }
 
 export type CollectionName = keyof Collections;
 export type RowOf<T extends CollectionName> = Collections[T];
-export type NewRow<T extends CollectionName> = Partial<RowOf<T>> & Omit<RowOf<T>, 'id'>;
+export type NewRow<T extends CollectionName> = Partial<RowOf<T>> & Omit<RowOf<T>, 'id' | 'createdAt' | 'updatedAt'>;
 
-export type Actor = {
+/** The signed-in identity every read and write is authorised against. */
+export interface Actor {
   uid: string;
   email: string;
   displayName: string;
   role: Role;
+  status: AccountStatus;
   facilityId: string | null;
-  accountStatus: AccountStatus;
-  motherId: string | null;
+  providerId: string | null;
+  /** The mother a supporter account helps. */
+  supportsUserId: string | null;
+  country: string;
+  language: LanguageCode;
+  photoUrl: string | null;
+  notificationPrefs: NotificationPreferences;
   privilegeVersion: number;
-  /**
-   * Where the authority came from. `firebase-profile` means the ID token carries
-   * no custom claims yet (a fresh or unapproved account), so the UI may show the
-   * role but Firestore rules will deny privileged reads.
-   */
-  claimsSource: 'firebase-id-token' | 'firebase-profile' | 'local-session';
-  /**
-   * Which layer decided `role`: the `users/{uid}` document (authoritative for
-   * display and dashboards), the ID token claims, or the safe default.
-   */
-  roleSource?: 'custom-claims' | 'firestore-document' | 'device-session' | 'default';
-  /**
-   * The stored document and the session token disagree. The request to re-mint
-   * claims has been made (or is pending); until it completes only the screens
-   * the claims allow will read data successfully.
-   */
-  claimsPendingSync?: boolean;
-  /** Set when the token could not be aligned with the stored role, with the reason. */
-  claimSyncNotice?: string | null;
-  /** User's country (ISO 3166-1 alpha-2). Zambia is the default. */
-  country?: string | null;
-};
+  /** Where the role came from — custom claims are authoritative when present. */
+  claimsSource: 'custom-claims' | 'profile-document' | 'device-session' | 'default';
+}
 
 export interface ListResult<T> {
   rows: T[];
@@ -112,16 +103,9 @@ export interface DataProvider {
   get<T extends CollectionName>(name: T, id: string, actor: Actor | null): Promise<RowOf<T> | null>;
   list<T extends CollectionName>(name: T, query: QuerySpec, actor: Actor | null): Promise<ListResult<RowOf<T>>>;
   create<T extends CollectionName>(name: T, value: NewRow<T>, actor: Actor | null): Promise<RowOf<T>>;
-  update<T extends CollectionName>(
-    name: T,
-    id: string,
-    patch: Partial<RowOf<T>>,
-    actor: Actor | null,
-  ): Promise<RowOf<T>>;
+  update<T extends CollectionName>(name: T, id: string, patch: Partial<RowOf<T>>, actor: Actor | null): Promise<RowOf<T>>;
   remove<T extends CollectionName>(name: T, id: string, actor: Actor | null): Promise<void>;
-  /** Atomic counter used for canonical patient ids and rule versions. */
   nextSequence(name: string, step?: number): Promise<number>;
-  /** Live subscription; returns an unsubscribe function. */
   subscribe<T extends CollectionName>(
     name: T,
     query: QuerySpec,
@@ -129,37 +113,28 @@ export interface DataProvider {
     onChange: (result: ListResult<RowOf<T>>) => void,
     onError: (error: unknown) => void,
   ): () => void;
-  /** Binary media storage (Cloudinary in production; IndexedDB on device). */
   putBlob(key: string, blob: Blob): Promise<void>;
   getBlob(key: string): Promise<Blob | null>;
   deleteBlob(key: string): Promise<void>;
-  /** Batched writes for multi-document clinical operations. */
   transact<T>(work: (tx: TxHandle) => Promise<T>): Promise<T>;
-  /** Device provider only — used by the destructive "reset this device" action. */
+  /** Device provider only — powers the destructive "reset this device" action. */
   purgeLocalData?(): Promise<void>;
 }
 
+/** Authentication adapters: Firebase Auth, or a device-local password store. */
+/** The profile a registration writes, before the identity provider mints the uid. */
+export type ProfileDraft = Omit<UserProfile, 'id' | 'uid' | 'createdAt' | 'updatedAt'>;
+
 export interface AuthAdapter {
   readonly kind: 'firebase' | 'local';
+  createAccount?(input: { email: string; password: string; profile: ProfileDraft }): Promise<unknown>;
   restore(): Promise<void>;
   getActor(): Promise<Actor | null>;
-  signIn(email: string, password: string): Promise<Actor>;
-  signOut(): Promise<void>;
-  register(input: {
-    fullName: string;
-    email: string;
-    phone: string;
-    password: string;
-    claims: AuthClaims;
-    photoUrl?: string | null;
-  }): Promise<{ uid: string }>;
-  resetPassword(email: string): Promise<void>;
-  confirmReset(code: string, password: string): Promise<void>;
-  changePassword(currentPassword: string | null, newPassword: string): Promise<void>;
-  updateProfile(patch: { displayName?: string; photoURL?: string | null }): Promise<void>;
-  deleteAccount(password?: string): Promise<void>;
   onSessionChange(listener: (actor: Actor | null) => void): () => void;
-  /** Re-reads claims so privilege changes take effect without a re-login. */
+  signIn(email: string, password: string, remember?: boolean): Promise<Actor>;
+  signOut(): Promise<void>;
   refreshClaims(): Promise<Actor | null>;
-  verifyRecentLogin?(password: string): Promise<void>;
+  sendPasswordReset(email: string): Promise<void>;
+  changePassword(current: string, next: string): Promise<void>;
+  deleteAccount(password?: string): Promise<void>;
 }

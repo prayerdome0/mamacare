@@ -481,14 +481,14 @@ export async function deleteAsset(asset: { publicId: string; localHandle?: strin
     return;
   }
   /**
-   * Cloudinary assets cannot be deleted from the browser without the API secret,
-   * which by design never reaches this process. The record is removed from
-   * MAMA CARE immediately; the administrator removes the orphan from the
-   * Cloudinary media library, or enables server-side deletion by setting
-   * CLOUDINARY_API_KEY / CLOUDINARY_API_SECRET on the API service.
+   * A Cloudinary asset cannot be deleted from the browser: deletion needs the API
+   * secret, which by design never reaches this process. The record is removed from
+   * Mama Care immediately and the asset is listed for an administrator to remove
+   * from the Cloudinary media library (Admin → Media queue). Nothing here
+   * pretends the cloud copy is gone when it is not.
    */
-  const { requestAssetDeletion } = await import('@/services/api/client');
-  await requestAssetDeletion({ publicId: asset.publicId, resourceType: 'image' }).catch(() => null);
+  const { queueOrphanAsset } = await import('@/services/media/orphans');
+  await queueOrphanAsset(asset.publicId).catch(() => undefined);
 }
 
 /**
@@ -497,9 +497,9 @@ export async function deleteAsset(asset: { publicId: string; localHandle?: strin
  */
 export const mediaSetupInstructions = (): string =>
   [
-    'Cloudinary (public imagery) — set VITE_CLOUDINARY_CLOUD_NAME=mk2tulbt and VITE_CLOUDINARY_UPLOAD_PRESET=Mamacare in web/.env.local.',
+    'Cloudinary — the cloud name and unsigned preset are built in (cloud mk2tulbt, preset "Mamacare"). Override with VITE_CLOUDINARY_CLOUD_NAME / VITE_CLOUDINARY_UPLOAD_PRESET in web/.env.local for another deployment.',
     'Uploads use the unsigned preset and land flat at the media-library root: no folder, no asset_folder, no public-id path is sent.',
     'Firebase Storage (clinical documents, reports, patient portraits) — set the VITE_FIREBASE_* values and deploy storage.rules.',
-    'The Cloudinary API secret is never used in the browser. Set CLOUDINARY_API_KEY / CLOUDINARY_API_SECRET on the API service only if server-side deletion is needed.',
+    'The Cloudinary API secret is never used in the browser. Deleted assets are queued for an administrator to remove from the media library.',
     'With neither configured, files stay on this device and the interface says so.',
   ].join('\n');

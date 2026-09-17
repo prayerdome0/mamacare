@@ -139,7 +139,7 @@ export interface Option {
 export function Select({
   options,
   invalid,
-  placeholder = 'Select…',
+  placeholder = null,
   className,
   onValueChange,
   ...rest

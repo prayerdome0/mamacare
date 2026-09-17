@@ -1,12 +1,21 @@
+/**
+ * Shared hooks.
+ *
+ * `useSession` lives in `providers/app-providers`; everything here is data
+ * plumbing: async state with a retryable error, one-shot mutations with field
+ * errors, live queries that re-run when the session changes, and small browser
+ * helpers.
+ */
+
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AppError, errorDisplay, toAppError } from '@/lib/errors';
 import { safeLocal } from '@/lib/storage';
 import { services } from '@/services/session-store';
 import type { CollectionName, ListResult, RowOf } from '@/services/data/contract';
 import type { QuerySpec } from '@/types/domain';
-import type { LiveQuery } from '@/types/domain';
+import { canReadCollection } from '@/services/policy/policy';
 
-/* ── session ─────────────────────────────────────────────────────────── */
+/* ── session shorthand ────────────────────────────────────────────────── */
 
 export function useSessionState() {
   const registry = services();
@@ -28,12 +37,12 @@ export function usePermissions() {
   return useSessionState().permissions;
 }
 
-/* ── async operation with loading / error / retry ────────────────────── */
+/* ── async state ──────────────────────────────────────────────────────── */
 
 export interface AsyncState<T> {
   data: T | null;
   loading: boolean;
-  /** Safe, user-facing message. `retryable` decides whether a Retry control is offered. */
+  /** Safe, user-facing message. `retryable` decides whether Retry is offered. */
   error: string | null;
   retryable: boolean;
   run: () => Promise<T | null>;
@@ -95,18 +104,15 @@ export function useAsync<T>(operation: () => Promise<T>, options: { immediate?: 
   };
 }
 
-/** One-shot submit with busy state, error mapping and success reset. */
+/* ── mutations ────────────────────────────────────────────────────────── */
+
 export function useMutation<Args extends unknown[], Result>(mutator: (...args: Args) => Promise<Result>) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const mounted = useRef(true);
-  useEffect(
-    () => () => {
-      mounted.current = false;
-    },
-    [],
-  );
+
+  useEffect(() => () => { mounted.current = false; }, []);
 
   const submit = useCallback(
     async (...args: Args): Promise<{ ok: true; value: Result } | { ok: false; error: string }> => {
@@ -121,123 +127,198 @@ export function useMutation<Args extends unknown[], Result>(mutator: (...args: A
         const mapped = toAppError(caught);
         if (mounted.current) {
           setPending(false);
-          setError(mapped.message);
           if (mapped.fieldErrors) setFieldErrors(mapped.fieldErrors);
+          setError(mapped.message);
         }
         return { ok: false, error: mapped.message };
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [],
+    [mutator],
   );
 
-  return { submit, pending, error, fieldErrors, setError, clearError: () => setError(null) };
+  return { submit, pending, error, fieldErrors, clear: () => { setError(null); setFieldErrors({}); } };
 }
 
-/* ── live collection subscription ───────────────────────────────────── */
+/* ── live queries ─────────────────────────────────────────────────────── */
 
-export function useLiveQuery<T extends CollectionName>(name: T, spec: QuerySpec, options: { enabled?: boolean } = {}): LiveQuery<RowOf<T>> {
+export interface LiveQueryState<T> {
+  rows: T[];
+  total: number;
+  loading: boolean;
+  error: string | null;
+  refresh: () => void;
+}
+
+/**
+ * Subscribes to a collection query. Falls back to a one-shot read when the
+ * provider cannot keep a subscription alive (for example a rules denial on a
+ * snapshot listener), so a screen degrades instead of spinning forever.
+ */
+export function useLiveQuery<T extends CollectionName>(
+  name: T,
+  spec: QuerySpec,
+  options: { enabled?: boolean; deps?: unknown[] } = {},
+): LiveQueryState<RowOf<T>> {
+  const { enabled = true, deps = [] } = options;
   const registry = services();
-  const actor = useActor();
-  const enabled = options.enabled !== false;
+  const [rows, setRows] = useState<RowOf<T>[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(enabled);
+  const [error, setError] = useState<string | null>(null);
+  const [tick, setTick] = useState(0);
   const specKey = useMemo(() => JSON.stringify(spec), [spec]);
-  const [state, setState] = useState<{ data: RowOf<T>[]; loading: boolean; error: string | null; total: number }>({
-    data: [],
-    loading: enabled,
-    error: null,
-    total: 0,
-  });
-
-  const runOnce = useCallback(async () => {
-    if (!enabled) {
-      setState((prev) => ({ ...prev, loading: false }));
-      return;
-    }
-    try {
-      const result = await registry.provider.list(name, JSON.parse(specKey) as QuerySpec, actor);
-      setState({ data: result.rows, loading: false, error: null, total: result.total });
-    } catch (caught) {
-      setState((prev) => ({ ...prev, loading: false, error: errorDisplay(caught).message }));
-    }
-  }, [registry, name, specKey, enabled, actor]);
+  const actorUid = registry.actorRef()?.uid ?? null;
 
   useEffect(() => {
-    if (!enabled) return;
-    let alive = true;
-    setState((prev) => ({ ...prev, loading: prev.data.length === 0 }));
-    const unsubscribe = registry.provider.subscribe(
+    if (!enabled) {
+      setLoading(false);
+      return;
+    }
+    if (!canReadCollection(registry.actorRef(), name)) {
+      setRows([]);
+      setTotal(0);
+      setLoading(false);
+      setError(null);
+      return;
+    }
+
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+
+    const unsubscribe = registry.data.subscribe(
       name,
       JSON.parse(specKey) as QuerySpec,
-      actor,
       (result: ListResult<RowOf<T>>) => {
-        if (alive) setState({ data: result.rows, loading: false, error: null, total: result.total });
+        if (cancelled) return;
+        setRows(result.rows);
+        setTotal(result.total);
+        setLoading(false);
       },
-      (error: unknown) => {
-        if (alive) setState((prev) => ({ ...prev, loading: false, error: errorDisplay(error).message }));
+      (caught: unknown) => {
+        if (cancelled) return;
+        // The subscription failed; try a plain read so the screen still has data.
+        void registry.data
+          .list(name, JSON.parse(specKey) as QuerySpec)
+          .then((result) => {
+            if (cancelled) return;
+            setRows(result.rows);
+            setTotal(result.total);
+            setLoading(false);
+          })
+          .catch((second: unknown) => {
+            if (cancelled) return;
+            const display = errorDisplay(second ?? caught);
+            setError(display.message);
+            setRows([]);
+            setLoading(false);
+          });
       },
     );
+
     return () => {
-      alive = false;
+      cancelled = true;
       unsubscribe();
     };
-  }, [registry, name, specKey, actor, enabled]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [name, specKey, enabled, tick, actorUid, ...deps]);
 
-  return { data: state.data, loading: state.loading, error: state.error, total: state.total, refresh: () => void runOnce() };
+  return { rows, total, loading, error, refresh: () => setTick((value) => value + 1) };
 }
 
-/* ── misc ────────────────────────────────────────────────────────────── */
+/* ── small browser helpers ────────────────────────────────────────────── */
 
 export function useDebouncedValue<T>(value: T, delay = 250): T {
   const [debounced, setDebounced] = useState(value);
   useEffect(() => {
-    const timer = setTimeout(() => setDebounced(value), delay);
-    return () => clearTimeout(timer);
+    const handle = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(handle);
   }, [value, delay]);
   return debounced;
 }
 
 export function useLocalState<T>(key: string, initial: T): [T, (value: T | ((current: T) => T)) => void] {
-  const [value, setValue] = useState<T>(() => safeLocal.getJson<T>(key, initial));
+  const [state, setState] = useState<T>(() => safeLocal.getJson<T>(key, initial));
   const update = useCallback(
-    (next: T | ((current: T) => T)) => {
-      setValue((current) => {
-        const resolved = typeof next === 'function' ? (next as (value: T) => T)(current) : next;
-        // Never throws: private mode and blocked storage fall back to memory.
-        safeLocal.setJson(key, resolved);
-        return resolved;
+    (value: T | ((current: T) => T)) => {
+      setState((current) => {
+        const next = typeof value === 'function' ? (value as (current: T) => T)(current) : value;
+        safeLocal.setJson(key, next);
+        return next;
       });
     },
     [key],
   );
-  return [value, update];
+  return [state, update];
 }
 
 export function useMediaQuery(query: string): boolean {
   const [matches, setMatches] = useState(() => (typeof window === 'undefined' ? false : window.matchMedia(query).matches));
   useEffect(() => {
-    const listener = window.matchMedia(query);
+    if (typeof window === 'undefined') return;
+    const list = window.matchMedia(query);
     const handler = (event: MediaQueryListEvent) => setMatches(event.matches);
-    setMatches(listener.matches);
-    listener.addEventListener('change', handler);
-    return () => listener.removeEventListener('change', handler);
+    setMatches(list.matches);
+    list.addEventListener('change', handler);
+    return () => list.removeEventListener('change', handler);
   }, [query]);
   return matches;
 }
 
-/** Blocks navigation away while a clinical form has unsaved entries. */
-export function useUnsavedChanges(dirty: boolean, message = 'You have unsaved clinical entries.'): void {
+/** Warns before a browser navigates away from a dirty form. */
+export function useUnsavedChanges(dirty: boolean, message = 'You have unsaved changes. Leave this page?'): void {
   useEffect(() => {
     if (!dirty) return;
     const handler = (event: BeforeUnloadEvent) => {
       event.preventDefault();
       event.returnValue = message;
-      return message;
     };
     window.addEventListener('beforeunload', handler);
     return () => window.removeEventListener('beforeunload', handler);
   }, [dirty, message]);
 }
 
-export const assertAllowed = (allowed: boolean, message: string): void => {
-  if (!allowed) throw new AppError(message, 'FORBIDDEN');
-};
+/** Periodically re-checks reminders while the app is open. */
+export function useReminderScheduler(enabled: boolean, intervalMs = 60_000): { lastRun: Date | null; created: number } {
+  const [lastRun, setLastRun] = useState<Date | null>(null);
+  const [created, setCreated] = useState(0);
+
+  useEffect(() => {
+    if (!enabled) return;
+    let cancelled = false;
+
+    const run = async (): Promise<void> => {
+      const registry = services();
+      const actor = registry.actorRef();
+      if (!actor || cancelled) return;
+      if (actor.role !== 'MOTHER' && actor.role !== 'SUPPORTER') return;
+      try {
+        const { runReminderScheduler } = await import('@/services/reminders');
+        const notifications = await runReminderScheduler(actor.uid, actor.notificationPrefs);
+        if (cancelled) return;
+        setLastRun(new Date());
+        if (notifications.length > 0) {
+          setCreated((value) => value + notifications.length);
+          window.dispatchEvent(new CustomEvent('mamacare:reminders', { detail: notifications }));
+        }
+      } catch (error) {
+        if (error instanceof AppError) return;
+      }
+    };
+
+    void run();
+    const handle = setInterval(run, intervalMs);
+    const onVisible = (): void => {
+      if (document.visibilityState === 'visible') void run();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      cancelled = true;
+      clearInterval(handle);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [enabled, intervalMs]);
+
+  return { lastRun, created };
+}

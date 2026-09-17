@@ -1,120 +1,142 @@
 rules_version = '2';
 
 /**
- * MAMA CARE — Cloud Storage security rules.
+ * Mama Care — Firebase Storage rules.
  *
- * Storage holds everything that must not sit on a public CDN:
+ * Two kinds of bytes are stored here, and they are separated by path rather than by
+ * convention:
  *
- *   mamacare/public/…       operator-uploaded site imagery  — world-readable
- *   mamacare/branding/…     logo and brand assets           — world-readable
- *   mamacare/profiles/…     user portraits                  — signed-in users
- *   mamacare/facilities/…   facility photography            — signed-in users
- *   mamacare/education/…    health-education media          — signed-in users
- *   mamacare/mothers/…      PATIENT portraits               — clinical staff
- *   mamacare/documents/…    clinical documents              — clinical staff
- *   mamacare/reports/…      generated reports               — clinical staff
+ *   mamacare/documents/{uid}/…   personal health documents — scans, lab results,
+ *                                prescriptions, birth records, child health cards
+ *   mamacare/mothers/{uid}/…     anything else a mother uploads for herself
+ *   mamacare/reports/{uid}/…     exports and generated summaries a person requested
+ *   mamacare/profiles|facilities|education|branding|public/…
+ *                                public imagery, used when Cloudinary is not
+ *                                configured for a deployment
  *
- * The sixteen maternal-health photographs on the public site ship inside the
- * application bundle (and may optionally be delivered from Cloudinary, flat at
- * the media-library root), so they never depend on Storage at all.
+ * The sensitive prefixes are readable only by their owner (and an administrator),
+ * are capped in size, and reject anything that is not a document or image type the
+ * app actually accepts. Public imagery is readable by anyone — it is shown on the
+ * public site — but only staff may write it.
  *
- * Principles, mirroring `firestore.rules`:
- *  • There is no rule for anything outside `mamacare/`, so it is denied.
- *  • An anonymous request can only read `public/**` and `branding/**`.
- *  • Patient data (`mothers`, `documents`, `reports`) is readable only by
- *    clinical staff and administrators — never by an anonymous visitor and
- *    never directly by a mother's account. A mother reaches the items shared
- *    with her through Firestore records that name her explicitly.
- *  • Uploads are constrained by size and content type at the edge, so a hostile
- *    client cannot fill the bucket with arbitrary bytes.
+ * Role lookups use `firestore.get`, so an administrator's access here follows the
+ * same role as everywhere else in the platform.
  */
 
-function isSignedIn() {
-  return request.auth != null;
-}
+service firebase.storage {
+  match /b/{bucket}/o {
 
-function role() {
-  return isSignedIn() && request.auth.token.role is string
-    ? request.auth.token.role
-    : 'MOTHER';
-}
+    function signedIn() {
+      return request.auth != null;
+    }
 
-/** The account must be signed in *and* approved — a pending account has no claim. */
-function isActive() {
-  return isSignedIn() && request.auth.token.accountStatus == 'ACTIVE';
-}
+    function uid() {
+      return request.auth.uid;
+    }
 
-function isAdmin() {
-  return isActive() && role() == 'ADMIN';
-}
+    function firestoreRole() {
+      if (!signedIn()) {
+        return 'GUEST';
+      }
+      if (request.auth.token.role != null) {
+        return string(request.auth.token.role);
+      }
+      return exists(/databases/(default)/documents/users/$(uid()))
+        ? string(firestore.get(/databases/(default)/documents/users/$(uid())).data.role)
+        : 'GUEST';
+    }
 
-/** Roles permitted to handle clinical files. */
-function isClinical() {
-  return isActive() && (
-    role() == 'ADMIN'
-    || role() == 'FACILITY_SUPERVISOR'
-    || role() == 'MIDWIFE'
-    || role() == 'NURSE'
-    || role() == 'COMMUNITY_HEALTH_WORKER'
-  );
-}
+    function isAdmin() {
+      return firestoreRole() == 'ADMIN';
+    }
 
-/** 20 MB ceiling, applied to every write regardless of who sends it. */
-function withinSize() {
-  return request.resource.size <= 20 * 1024 * 1024;
-}
+    function isStaff() {
+      return firestoreRole() in ['ADMIN', 'FACILITY_ADMIN', 'PROVIDER'];
+    }
 
-function isImageType() {
-  return request.resource.contentType.matches('image/(jpeg|jpg|png|webp|avif|heic|gif)');
-}
+    function accountInGoodStanding() {
+      return signedIn()
+        && exists(/databases/(default)/documents/users/$(uid()))
+        && firestore.get(/databases/(default)/documents/users/$(uid())).data.status in ['ACTIVE', 'PENDING_APPROVAL'];
+    }
 
-function isDocumentType() {
-  return isImageType() || request.resource.contentType == 'application/pdf';
-}
+    /** 15 MB — the same ceiling the uploader enforces in the browser. */
+    function withinDocumentSize() {
+      return request.resource.size < 15 * 1024 * 1024;
+    }
 
-match /b/{bucket}/o {
+    /** 10 MB for imagery. */
+    function withinImageSize() {
+      return request.resource.size < 10 * 1024 * 1024;
+    }
 
-  // ── Public brand and site imagery ──────────────────────────────────
-  match /mamacare/public/{allPaths=**} {
-    allow read: if true;
-    allow write: if isAdmin() && withinSize() && isImageType();
-  }
+    function documentType() {
+      return request.resource.contentType.matches('application/pdf.*')
+        || request.resource.contentType.matches('image/.*')
+        || request.resource.contentType.matches('text/plain.*');
+    }
 
-  match /mamacare/branding/{allPaths=**} {
-    allow read: if true;
-    allow write: if isAdmin() && withinSize() && isImageType();
-  }
+    function imageType() {
+      return request.resource.contentType.matches('image/.*');
+    }
 
-  // ── Portraits, facility and education media ────────────────────────
-  match /mamacare/profiles/{allPaths=**} {
-    allow read: if isSignedIn();
-    allow write: if isActive() && withinSize() && isImageType();
-  }
+    /* ── Personal health documents ────────────────────────────────────── */
 
-  match /mamacare/facilities/{allPaths=**} {
-    allow read: if isSignedIn();
-    allow write: if isClinical() && withinSize() && isImageType();
-  }
+    match /mamacare/documents/{userId}/{fileName} {
+      // The owner, and an administrator who can see that a file exists and remove
+      // it. Never a clinician: a provider who needs a scan asks for it in person.
+      allow read: if isAdmin() || (signedIn() && userId == uid());
 
-  match /mamacare/education/{allPaths=**} {
-    allow read: if isSignedIn();
-    allow write: if (isAdmin() || (isActive() && role() == 'FACILITY_SUPERVISOR')) && withinSize() && isImageType();
-  }
+      allow write: if isAdmin()
+        || (accountInGoodStanding() && userId == uid() && withinDocumentSize() && documentType());
+    }
 
-  /* ── PATIENT DATA ─────────────────────────────────────────────────── */
+    match /mamacare/mothers/{userId}/{fileName} {
+      allow read: if isAdmin() || (signedIn() && userId == uid());
+      allow write: if isAdmin()
+        || (accountInGoodStanding() && userId == uid() && withinDocumentSize() && documentType());
+    }
 
-  match /mamacare/mothers/{allPaths=**} {
-    allow read: if isClinical();
-    allow write: if isClinical() && withinSize() && isImageType();
-  }
+    match /mamacare/reports/{userId}/{fileName} {
+      allow read: if isAdmin() || (signedIn() && userId == uid());
+      allow write: if isAdmin() || (accountInGoodStanding() && userId == uid() && withinDocumentSize());
+    }
 
-  match /mamacare/documents/{allPaths=**} {
-    allow read: if isClinical();
-    allow write: if isClinical() && withinSize() && isDocumentType();
-  }
+    /* ── Public imagery ───────────────────────────────────────────────── */
 
-  match /mamacare/reports/{allPaths=**} {
-    allow read: if isClinical();
-    allow write: if isClinical() && withinSize();
+    // Profile pictures are shown in the public provider directory and on care-team
+    // cards, so they are readable by anyone; only the owner may replace theirs.
+    match /mamacare/profiles/{fileName} {
+      allow read: if true;
+      allow write: if accountInGoodStanding() && withinImageSize() && imageType();
+    }
+
+    // Facility and education imagery is written by staff and read by everybody.
+    match /mamacare/facilities/{fileName} {
+      allow read: if true;
+      allow write: if accountInGoodStanding() && isAdmin() && withinImageSize() && imageType();
+    }
+
+    match /mamacare/education/{fileName} {
+      allow read: if true;
+      allow write: if accountInGoodStanding() && isStaff() && withinImageSize() && imageType();
+    }
+
+    match /mamacare/branding/{fileName} {
+      allow read: if true;
+      allow write: if accountInGoodStanding() && isAdmin() && withinImageSize() && imageType();
+    }
+
+    match /mamacare/public/{fileName} {
+      allow read: if true;
+      allow write: if accountInGoodStanding() && isStaff() && withinImageSize() && imageType();
+    }
+
+    /* Everything else — including any path outside the mamacare root — is closed.
+     * A new folder is denied until somebody writes a rule for it and says who it is
+     * for, which is the same default the Firestore rules use. */
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
   }
 }

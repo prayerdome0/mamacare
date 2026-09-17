@@ -1,49 +1,51 @@
+/**
+ * Device (IndexedDB) provider.
+ *
+ * Mirrors the Firestore provider's behaviour exactly, including authorisation:
+ * every read and write travels through `services/policy/policy` so an offline
+ * session cannot see or change anything a hosted session could not. It also
+ * seeds the built-in education library, the reviewed immunization schedule and a
+ * starter facility directory on first run, so a new install is immediately
+ * useful — real records, written through the normal code path.
+ */
+
 import { AppError } from '@/lib/errors';
 import { newId } from '@/lib/ids';
 import type { QuerySpec } from '@/types/domain';
-import type { Actor, CollectionName, DataProvider, ListResult, NewRow, RowOf, TxHandle } from '@/services/data/contract';
-import { canReadRow, canWrite, isAdmin, touchesFacility } from '@/services/policy/policy';
+import type {
+  Actor,
+  CollectionName,
+  DataProvider,
+  ListResult,
+  NewRow,
+  RowOf,
+  TxHandle,
+} from '@/services/data/contract';
 import { applyQuery } from '@/services/data/query-engine';
-import * as store from './store';
-
-/**
- * Device provider: real persistence (IndexedDB) with the platform access policy
- * executed on every read and write. Used when Firebase project configuration is
- * absent, and as the offline cache path for field devices.
- */
-
-const FACILITY_WRITABLE: CollectionName[] = [
-  'mothers',
-  'pregnancies',
-  'anc_visits',
-  'appointments',
-  'alerts',
-  'referrals',
-  'reports',
-  'documents',
-];
-
-const immutableOnUpdate: Partial<Record<CollectionName, string[]>> = {
-  mothers: ['id', 'patientId', 'createdAt', 'createdBy', 'createdByName'],
-  anc_visits: ['id', 'motherId', 'pregnancyId', 'createdAt', 'createdBy', 'createdByName', 'clientRef'],
-  pregnancies: ['id', 'motherId', 'createdAt', 'createdBy'],
-  alerts: ['id', 'motherId', 'pregnancyId', 'openedAt', 'openedBy', 'openedByName', 'level', 'ruleKey'],
-  referrals: ['id', 'motherId', 'createdAt', 'createdBy', 'createdByName', 'originFacilityId'],
-  audit_logs: ['id', 'actorId', 'action', 'createdAt', 'targetId', 'targetType'],
-  reports: ['id', 'generatedBy', 'generatedAt', 'type'],
-  documents: ['id', 'uploadedBy', 'uploadedAt', 'publicId'],
-  users: ['id', 'email', 'createdAt'],
-};
+import { canReadRow, canWrite, isAdmin, type WriteOp } from '@/services/policy/policy';
+import * as store from '@/services/data/local/store';
+import { seedDeviceData } from '@/services/data/local/seed';
 
 const now = (): string => new Date().toISOString();
 
-/** Rows that must never be silently stamped with the writer's facility. */
-const SKIP_FACILITY_STAMP: CollectionName[] = ['users', 'facilities', 'settings', 'alert_rules', 'devices', 'notifications', 'audit_logs', 'education', 'facility_assignments'];
+/** Fields that cannot be changed after creation. */
+const IMMUTABLE: Partial<Record<CollectionName, string[]>> = {
+  users: ['uid', 'createdAt'],
+  audit_logs: ['action', 'actorId', 'createdAt'],
+  care_links: ['motherUserId', 'createdAt'],
+};
 
 export class LocalDataProvider implements DataProvider {
   readonly kind = 'local' as const;
+  private seeded: Promise<void> | null = null;
 
   constructor(private readonly options: { enforcePolicy?: boolean } = { enforcePolicy: true }) {}
+
+  /** Runs the first-install seed once, before any read or write. */
+  private async ensureSeeded(): Promise<void> {
+    if (!this.seeded) this.seeded = seedDeviceData(this);
+    await this.seeded.catch(() => undefined);
+  }
 
   private async assertRead<T extends CollectionName>(name: T, row: RowOf<T>, actor: Actor | null): Promise<RowOf<T>> {
     if (!this.options.enforcePolicy) return row;
@@ -53,65 +55,36 @@ export class LocalDataProvider implements DataProvider {
   }
 
   async get<T extends CollectionName>(name: T, id: string, actor: Actor | null): Promise<RowOf<T> | null> {
+    await this.ensureSeeded();
     const row = await store.get<RowOf<T>>(name, id);
     if (!row) return null;
     return this.assertRead(name, row, actor);
   }
 
   async list<T extends CollectionName>(name: T, query: QuerySpec, actor: Actor | null): Promise<ListResult<RowOf<T>>> {
+    await this.ensureSeeded();
     const rows = await store.all<RowOf<T>>(name);
     const visible = this.options.enforcePolicy
       ? rows.filter((row) => canReadRow(actor, name, row).allowed)
       : rows;
-    const result = applyQuery(visible, query);
-    return { rows: result.rows, total: result.total };
+    return applyQuery(visible, query);
   }
 
   async create<T extends CollectionName>(name: T, value: NewRow<T>, actor: Actor | null): Promise<RowOf<T>> {
+    await this.ensureSeeded();
     const record = value as Record<string, unknown>;
     const id = typeof record.id === 'string' && record.id ? record.id : newId();
-    const decision = canWrite(actor, name, 'create', null, record as unknown as Record<string, unknown>);
+    const decision = this.decide(actor, name, 'create', null, record);
     if (!decision.allowed) throw new AppError(decision.reason ?? 'You cannot create this record.', 'FORBIDDEN');
 
     const stamped: Record<string, unknown> = { ...record, id };
-    if (this.options.enforcePolicy && actor) {
-      if (actor.role !== 'MOTHER' && !SKIP_FACILITY_STAMP.includes(name)) {
-        const needsFacility = !stamped.facilityId && !stamped.registrationFacilityId && !stamped.originFacilityId;
-        if (name !== 'referrals' && needsFacility && actor.facilityId) {
-          // A referral is stamped with the *origin* facility below: it is not the
-          // writer's record to place at their own facility by default.
-          stamped.facilityId = actor.facilityId;
-        }
-        const facilityField = ['facilityId', 'registrationFacilityId', 'originFacilityId'].find(
-          (key) => typeof stamped[key] === 'string',
-        );
-        if (
-          facilityField &&
-          !isAdmin(actor) &&
-          FACILITY_WRITABLE.includes(name) &&
-          !touchesFacility(stamped, actor.facilityId)
-        ) {
-          throw new AppError(
-            'You can only create records for your own facility. Ask an administrator to change your facility assignment.',
-            'FORBIDDEN',
-          );
-        }
-      }
-      if (actor.role === 'MOTHER' && name === 'alerts') stamped.motherId = actor.motherId;
-      if (name === 'audit_logs') {
-        stamped.createdAt = typeof stamped.createdAt === 'string' ? stamped.createdAt : now();
-        stamped.actorId = actor?.uid ?? 'system';
-      }
-      if (name === 'mothers' && !stamped.patientId) {
-        stamped.patientId = `MC-${String(await store.incrementMeta('patientId')).padStart(6, '0')}`;
-      } else if (name === 'mothers' && typeof stamped.patientId === 'string') {
-        const existing = await store.all<RowOf<'mothers'>>('mothers');
-        if (existing.some((row) => row.patientId === stamped.patientId)) {
-          throw new AppError('That patient ID is already in use at another facility.', 'CONFLICT');
-        }
-      }
+    if (name === 'users' && !stamped.privilegeVersion) stamped.privilegeVersion = 1;
+    if (name === 'audit_logs') {
+      stamped.actorId = actor?.uid ?? 'system';
+      stamped.actorName = actor?.displayName ?? 'System';
+      stamped.actorRole = actor?.role ?? 'SYSTEM';
+      stamped.createdAt = typeof stamped.createdAt === 'string' ? stamped.createdAt : now();
     }
-
     if (!stamped.createdAt) stamped.createdAt = now();
     stamped.updatedAt = now();
     await store.put(name, stamped as unknown as RowOf<T>);
@@ -124,22 +97,16 @@ export class LocalDataProvider implements DataProvider {
     patch: Partial<RowOf<T>>,
     actor: Actor | null,
   ): Promise<RowOf<T>> {
+    await this.ensureSeeded();
     const existing = await store.get<RowOf<T>>(name, id);
     if (!existing) throw new AppError('That record no longer exists.', 'NOT_FOUND');
 
-    const decision = canWrite(actor, name, 'update', existing, patch as Record<string, unknown>);
+    const decision = this.decide(actor, name, 'update', existing, patch as Record<string, unknown>);
     if (!decision.allowed) throw new AppError(decision.reason ?? 'You cannot change this record.', 'FORBIDDEN');
 
-    const locked = immutableOnUpdate[name] ?? [];
     const safePatch: Record<string, unknown> = { ...(patch as Record<string, unknown>) };
     if (this.options.enforcePolicy) {
-      for (const key of locked) delete safePatch[key];
-      if (!isAdmin(actor) && name === 'users') {
-        for (const key of ['role', 'status', 'facilityId', 'privilegeVersion', 'motherId', 'accountKind']) delete safePatch[key];
-      }
-      if (!isAdmin(actor) && FACILITY_WRITABLE.includes(name) && safePatch.facilityId && safePatch.facilityId !== (existing as unknown as Record<string, unknown>).facilityId) {
-        throw new AppError('Records cannot be moved between facilities from the app.', 'FORBIDDEN');
-      }
+      for (const key of IMMUTABLE[name] ?? []) delete safePatch[key];
     }
 
     const merged = { ...(existing as unknown as Record<string, unknown>), ...safePatch, updatedAt: now() } as unknown as RowOf<T>;
@@ -152,11 +119,25 @@ export class LocalDataProvider implements DataProvider {
   }
 
   async remove<T extends CollectionName>(name: T, id: string, actor: Actor | null): Promise<void> {
+    await this.ensureSeeded();
     const existing = await store.get<RowOf<T>>(name, id);
     if (!existing) return;
-    const decision = canWrite(actor, name, 'delete', existing, null);
+    const decision = this.decide(actor, name, 'delete', existing, null);
     if (!decision.allowed) throw new AppError(decision.reason ?? 'You cannot delete this record.', 'FORBIDDEN');
     await store.remove(name, id);
+  }
+
+  private decide(
+    actor: Actor | null,
+    name: CollectionName,
+    op: WriteOp,
+    existing: unknown,
+    patch: Record<string, unknown> | null,
+  ) {
+    if (!this.options.enforcePolicy) return { allowed: true } as const;
+    // An administrator is always allowed; everything else is the policy's call.
+    if (isAdmin(actor) && name !== 'audit_logs') return { allowed: true } as const;
+    return canWrite(actor, name, op, existing, patch);
   }
 
   async nextSequence(name: string, step = 1): Promise<number> {
@@ -191,7 +172,7 @@ export class LocalDataProvider implements DataProvider {
       });
     };
 
-    void run();
+    void this.ensureSeeded().then(run);
     const unsubscribe = store.subscribeToStores([name], schedule);
     return () => {
       cancelled = true;
@@ -212,17 +193,12 @@ export class LocalDataProvider implements DataProvider {
     await store.remove('blobs', key);
   }
 
-  /**
-   * Ordered writes applied as one flush. The device provider has no cross-store
-   * transaction, so operations are buffered, validated and written in
-   * parent→child order; a mid-flush failure surfaces for retry rather than
-   * silently half-writing.
-   */
+  /** Ordered writes flushed as one unit (parent → child). */
   async transact<T>(work: (tx: TxHandle) => Promise<T>): Promise<T> {
     type Write =
-      | { op: 'set'; name: store.StoreName; id: string; value: Record<string, unknown> }
-      | { op: 'merge'; name: store.StoreName; id: string; patch: Record<string, unknown> }
-      | { op: 'remove'; name: store.StoreName; id: string };
+      | { op: 'set'; name: CollectionName; id: string; value: Record<string, unknown> }
+      | { op: 'merge'; name: CollectionName; id: string; patch: Record<string, unknown> }
+      | { op: 'remove'; name: CollectionName; id: string };
     const writes: Write[] = [];
     const handle: TxHandle = {
       set: (name, id, value) => writes.push({ op: 'set', name, id, value: value as unknown as Record<string, unknown> }),
@@ -237,7 +213,7 @@ export class LocalDataProvider implements DataProvider {
         continue;
       }
       if (write.op === 'set') {
-        await store.put(write.name, { id: write.id, ...write.value });
+        await store.put(write.name, { id: write.id, ...write.value, updatedAt: now() });
         continue;
       }
       const existing = (await store.get<Record<string, unknown>>(write.name, write.id)) ?? { id: write.id };
@@ -248,34 +224,33 @@ export class LocalDataProvider implements DataProvider {
 
   async purgeLocalData(): Promise<void> {
     await store.wipe();
+    this.seeded = null;
   }
 
-  /** Exposed for the demonstration-dataset tooling (device provider only). */
+  /** Seed helpers — device provider only. */
   async seedRows<T extends CollectionName>(name: T, rows: RowOf<T>[]): Promise<void> {
     await store.bulkPut(name, rows as unknown as { id: string }[]);
   }
 
-  /**
-   * Auth-layer read with no policy applied — the device-mode equivalent of an
-   * Admin SDK lookup. Only session bootstrap may use it; every screen reads
-   * through `get`/`list`.
-   */
+  /** Auth-layer read with no policy applied (device-mode Admin SDK equivalent). */
   async readRaw<T extends CollectionName>(name: T, id: string): Promise<RowOf<T> | null> {
+    await this.ensureSeeded();
     return store.get<RowOf<T>>(name, id);
   }
 
-  /**
-   * Account provisioning. In the hosted mode the identity provider creates the
-   * user and the first-write rule lets that same user create their own profile
-   * with a least-privilege role; this is the device-mode equivalent, so role
-   * assignment never flows through a general-purpose write path.
-   */
+  /** Account provisioning: the device-mode equivalent of the first-write rule. */
   async provisionUser(row: RowOf<'users'>): Promise<RowOf<'users'>> {
+    // No ensureSeeded() here: the seeder itself provisions accounts, and awaiting
+    // its own promise would deadlock.
     await store.put('users', row);
     return row;
+  }
+
+  async countAll(name: CollectionName): Promise<number> {
+    return (await store.all(name)).length;
   }
 }
 
 export const createLocalProvider = (): LocalDataProvider => new LocalDataProvider();
-export const createUnscopedLocalProvider = (): LocalDataProvider =>
-  new LocalDataProvider({ enforcePolicy: false });
+/** Used only by the seeder and tests, which must write before a session exists. */
+export const createUnscopedLocalProvider = (): LocalDataProvider => new LocalDataProvider({ enforcePolicy: false });

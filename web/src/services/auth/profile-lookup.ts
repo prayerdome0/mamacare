@@ -1,135 +1,110 @@
 /**
- * Profile → role bridge.
+ * Turning a stored profile into a session `Actor`.
  *
- * The `users/{uid}` document is where a role is *stored* (an administrator can
- * set `role: "admin"` in the Firebase console and the person is an administrator
- * here — no email address is ever hard-coded in the client). Firestore custom
- * claims are the copy that the security rules enforce, and they are minted by
- * the API service from this very document.
- *
- * This module reads the document, normalises whatever shape it has (legacy rows,
- * hand-written console rows with `role: "user"`, `name` instead of `fullName`),
- * and hands the caller a typed profile. It never throws: a failed lookup means
- * "no stored profile", and the caller falls back to the token claims.
+ * The profile document is the readable source of truth for role and facility;
+ * Firebase custom claims are the authoritative source when they are present,
+ * because only they can gate a hosted Firestore query. This module merges the
+ * two and records *where* the role came from, so the interface can explain a
+ * mismatch instead of silently showing the wrong dashboard.
  */
 
-import { doc, getDoc } from 'firebase/firestore';
-import { firestoreDb } from '@/services/data/firestore-provider';
-import { logProviderError } from '@/lib/errors';
-import type { LocalDataProvider } from '@/services/data/local/provider';
-import {
-  nameFromRow,
-  normaliseRole,
-  privilegeVersionFromRow,
-  statusFromRow,
-  type UserRowLike,
-} from '@/services/auth/role-resolution';
-import type { AccountStatus, Role } from '@/types/domain';
+import type { Actor } from '@/services/data/contract';
+import type { AccountStatus, LanguageCode, Role, UserProfile } from '@/types/domain';
+import { DEFAULT_NOTIFICATION_PREFS } from '@/types/domain';
 
-export interface StoredProfile {
-  /** False when no document exists yet (a brand-new account before it is written). */
-  exists: boolean;
-  fullName: string;
-  email: string;
-  /** The stored role, normalised; `null` when absent or unrecognised. */
+const ROLES: Role[] = ['MOTHER', 'SUPPORTER', 'PROVIDER', 'FACILITY_ADMIN', 'ADMIN'];
+
+const asRole = (value: unknown): Role | null =>
+  typeof value === 'string' && (ROLES as string[]).includes(value.toUpperCase()) ? (value.toUpperCase() as Role) : null;
+
+const asStatus = (value: unknown): AccountStatus =>
+  typeof value === 'string' && ['ACTIVE', 'PENDING_APPROVAL', 'SUSPENDED', 'CLOSED'].includes(value.toUpperCase())
+    ? (value.toUpperCase() as AccountStatus)
+    : 'ACTIVE';
+
+export interface Claims {
   role: Role | null;
-  status: AccountStatus;
   facilityId: string | null;
-  motherId: string | null;
+  providerId: string | null;
   privilegeVersion: number;
-  country: string | null;
 }
 
-const empty = (fallbackEmail: string): StoredProfile => ({
-  exists: false,
-  fullName: '',
-  email: fallbackEmail,
-  role: null,
-  status: 'PENDING_APPROVAL',
-  facilityId: null,
-  motherId: null,
-  privilegeVersion: 0,
-  country: null,
-});
-
-function shape(row: UserRowLike, email: string): StoredProfile {
-  const facilityId = typeof row.facilityId === 'string' && row.facilityId ? row.facilityId : null;
-  const motherId = typeof row.motherId === 'string' && row.motherId ? row.motherId : null;
-  const country = typeof (row as { country?: unknown }).country === 'string' ? ((row as { country?: string }).country ?? null) : null;
+/** Reads the role-bearing fields out of a Firebase ID token's custom claims. */
+export function claimsFromToken(claims: Record<string, unknown> | null | undefined): Claims {
+  const source = claims ?? {};
+  const version = Number(source.privilegeVersion ?? source.pv ?? 0);
   return {
-    exists: true,
-    fullName: nameFromRow(row, ''),
-    email: typeof row.email === 'string' && row.email ? row.email : email,
-    role: normaliseRole(row.role),
-    status: statusFromRow(row, 'ACTIVE'),
-    facilityId,
-    motherId,
-    privilegeVersion: privilegeVersionFromRow(row, 1),
-    country,
+    role: asRole(source.role),
+    facilityId: typeof source.facilityId === 'string' ? source.facilityId : null,
+    providerId: typeof source.providerId === 'string' ? source.providerId : null,
+    privilegeVersion: Number.isFinite(version) ? version : 0,
   };
 }
 
-/** Reads `users/{uid}` from Cloud Firestore (the production path). */
-export async function readStoredProfile(uid: string, email = ''): Promise<StoredProfile> {
-  try {
-    const snap = await getDoc(doc(firestoreDb(), 'users', uid));
-    if (!snap.exists()) return empty(email);
-    return shape(snap.data() as UserRowLike, email);
-  } catch (error) {
-    // A permission-denied here is a rules problem, not a reason to sign the user
-    // out: the ID token claims still work and the diagnostics screen reports it.
-    logProviderError('users/{uid} read', error);
-    return empty(email);
-  }
+export function toActor(profile: UserProfile, tokenClaims: Claims | null = null): Actor {
+  // Custom claims win when present: they are what the database rules will enforce.
+  const role = tokenClaims?.role ?? profile.role ?? 'MOTHER';
+  const claimsSource = tokenClaims?.role
+    ? ('custom-claims' as const)
+    : profile.role
+      ? ('profile-document' as const)
+      : ('default' as const);
+  return {
+    uid: profile.uid || profile.id,
+    email: profile.email ?? '',
+    displayName: profile.fullName ?? 'Mama',
+    role,
+    status: asStatus(profile.status),
+    facilityId: tokenClaims?.facilityId ?? profile.facilityId ?? null,
+    providerId: tokenClaims?.providerId ?? profile.providerId ?? null,
+    supportsUserId: profile.supportsUserId ?? null,
+    country: profile.country ?? 'ZM',
+    language: (profile.language ?? 'en') as LanguageCode,
+    photoUrl: profile.photoUrl ?? null,
+    notificationPrefs: profile.notificationPrefs ?? DEFAULT_NOTIFICATION_PREFS,
+    privilegeVersion: Math.max(tokenClaims?.privilegeVersion ?? 0, profile.privilegeVersion ?? 0),
+    claimsSource,
+  };
 }
 
-/** Reads `users/{uid}` from the device (IndexedDB) provider. */
-export async function readLocalStoredProfile(
-  uid: string,
-  provider: LocalDataProvider,
-  email = '',
-): Promise<StoredProfile> {
-  try {
-    const row = await provider.readRaw('users', uid);
-    if (!row) return empty(email);
-    return shape(row as unknown as UserRowLike, email);
-  } catch (error) {
-    logProviderError('local users/{uid} read', error);
-    return empty(email);
-  }
-}
+/** Profile fields that may not be set by the account holder. */
+export const PRIVILEGED_PROFILE_FIELDS = ['role', 'status', 'privilegeVersion', 'providerId', 'facilityId'] as const;
 
-/* ── compatibility shims used by the session store ───────────────────── */
-
-export interface ProfileClaims {
+export function defaultProfile(input: {
+  uid: string;
   fullName: string;
   email: string;
-  role: Role;
-  facilityId: string | null;
-  accountStatus: AccountStatus;
-  motherId: string | null;
-  privilegeVersion: number;
-}
-
-export const toProfileClaims = (profile: StoredProfile, fallbackRole: Role = 'MOTHER'): ProfileClaims => ({
-  fullName: profile.fullName,
-  email: profile.email,
-  role: profile.role ?? fallbackRole,
-  facilityId: profile.facilityId,
-  accountStatus: profile.status,
-  motherId: profile.motherId,
-  privilegeVersion: profile.privilegeVersion,
-});
-
-export async function readProfileClaims(uid: string): Promise<ProfileClaims | null> {
-  const profile = await readStoredProfile(uid);
-  return profile.exists ? toProfileClaims(profile) : null;
-}
-
-export async function readLocalProfile(
-  uid: string,
-  provider: LocalDataProvider,
-): Promise<ProfileClaims | null> {
-  const profile = await readLocalStoredProfile(uid, provider);
-  return profile.exists ? toProfileClaims(profile) : null;
+  phone?: string | null;
+  dateOfBirth?: string | null;
+  country?: string;
+  language?: LanguageCode;
+  role?: Role;
+  status?: AccountStatus;
+  emergencyContact?: UserProfile['emergencyContact'];
+}): UserProfile {
+  const nowIso = new Date().toISOString();
+  return {
+    id: input.uid,
+    uid: input.uid,
+    fullName: input.fullName,
+    email: input.email,
+    phone: input.phone ?? null,
+    dateOfBirth: input.dateOfBirth ?? null,
+    country: input.country ?? 'ZM',
+    language: input.language ?? 'en',
+    role: input.role ?? 'MOTHER',
+    status: input.status ?? 'ACTIVE',
+    photoUrl: null,
+    photoPublicId: null,
+    emergencyContact: input.emergencyContact ?? null,
+    notificationPrefs: { ...DEFAULT_NOTIFICATION_PREFS },
+    providerId: null,
+    facilityId: null,
+    supportsUserId: null,
+    consentAt: nowIso,
+    lastLoginAt: null,
+    privilegeVersion: 1,
+    createdAt: nowIso,
+    updatedAt: nowIso,
+  };
 }

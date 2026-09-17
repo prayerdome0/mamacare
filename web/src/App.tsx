@@ -1,236 +1,312 @@
-import { Component, lazy, Suspense, type ErrorInfo, type ReactNode } from 'react';
-import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
-import { NavScope } from '@/components/layout/nav-scope';
-import { ADMIN_NAV, APP_NAV, MOTHER_NAV } from '@/components/layout/shell';
-import { BootScreen, ForbiddenPage, NotFoundPage, RequireAuth, RequireGuest, RequireStaff, ServerErrorPage } from '@/routes/guards';
-import { AppProviders } from '@/providers/app-providers';
+/**
+ * Application router.
+ *
+ * Three portals share one codebase and one design system, and the routing reflects
+ * that: public pages anybody can read, `/app` for mothers and their supporters,
+ * `/provider` for clinicians, `/admin` for operators. Guards decide *where* you
+ * land; the policy module and the data layer decide *what you may read*, so a wrong
+ * guess in a URL bar can never expose a record.
+ *
+ * Every route is lazily loaded. A mother on a 3G connection in Lusaka should
+ * download the pregnancy tracker, not the administrator's audit log.
+ */
 
-/* Route-level code splitting: the public site, the portal and the workspace each
-   ship their own chunk so a first visit to the landing page never downloads the
-   clinical screens. */
+import { lazy, Suspense, useEffect } from 'react';
+import { BrowserRouter, Navigate, Route, Routes, useLocation, useParams } from 'react-router-dom';
+import { AppProviders, useSession } from '@/providers/app-providers';
+import {
+  FullPageSpinner,
+  RedirectIfSignedIn,
+  RequireAdmin,
+  RequireAuth,
+  RequireProvider,
+  RequireSystemAdmin,
+  homeForRole,
+} from '@/routes/guards';
+import { ARTICLE_CATEGORY_LABELS, type ArticleCategory } from '@/types/domain';
+import { NotFoundPage } from '@/routes/public/static';
+
+/* ── Public ────────────────────────────────────────────────────────────── */
 const Landing = lazy(() => import('@/routes/public/landing'));
-const About = lazy(() => import('@/routes/public/about'));
-const Services = lazy(() => import('@/routes/public/services'));
-const HowItWorks = lazy(() => import('@/routes/public/how-it-works'));
-const ForClinics = lazy(() => import('@/routes/public/for-clinics'));
-const ForMothers = lazy(() => import('@/routes/public/for-mothers'));
-const Resources = lazy(() => import('@/routes/public/resources'));
-const MaternalHealth = lazy(() => import('@/routes/public/maternal-health'));
-const Emergency = lazy(() => import('@/routes/public/emergency'));
-const Contact = lazy(() => import('@/routes/public/contact'));
-const Faq = lazy(() => import('@/routes/public/faq-page'));
-const Privacy = lazy(() => import('@/routes/public/privacy'));
-const Status = lazy(() => import('@/routes/public/status'));
+const LearnPage = lazy(() => import('@/routes/public/learn'));
+const ArticlePage = lazy(() => import('@/routes/public/article'));
+const FacilitiesPage = lazy(() => import('@/routes/public/facilities'));
+const ProvidersPage = lazy(() => import('@/routes/public/providers'));
+const EmergencyPage = lazy(() => import('@/routes/public/emergency'));
 
-const SignIn = lazy(() => import('@/routes/auth/sign-in'));
-const Register = lazy(() => import('@/routes/auth/register'));
-const ForgotPassword = lazy(() => import('@/routes/auth/forgot-password'));
-const ResetPassword = lazy(() => import('@/routes/auth/reset-password'));
-const PendingApproval = lazy(() => import('@/routes/auth/pending-approval'));
+/* ── Authentication ────────────────────────────────────────────────────── */
+const SignInPage = lazy(() => import('@/routes/auth/sign-in'));
+const RegisterPage = lazy(() => import('@/routes/auth/register'));
+const ForgotPasswordPage = lazy(() => import('@/routes/auth/forgot-password'));
+const PendingApprovalPage = lazy(() => import('@/routes/auth/pending'));
 
-const WorkerDashboard = lazy(() => import('@/routes/app/dashboard'));
-const MothersPage = lazy(() => import('@/routes/app/mothers'));
-const MotherProfilePage = lazy(() => import('@/routes/app/mother-profile'));
-const AncVisitsPage = lazy(() => import('@/routes/app/anc-visits'));
-const AppointmentsPage = lazy(() => import('@/routes/app/appointments'));
-const AlertsPage = lazy(() => import('@/routes/app/alerts'));
-const ReferralsPage = lazy(() => import('@/routes/app/referrals'));
-const DocumentsPage = lazy(() => import('@/routes/app/documents'));
-const ReportsPage = lazy(() => import('@/routes/app/reports'));
-const EducationPage = lazy(() => import('@/routes/app/education'));
-const NotificationsPage = lazy(() => import('@/routes/app/notifications'));
-const MessagesPage = lazy(() => import('@/routes/app/messages'));
-const ProfilePage = lazy(() => import('@/routes/app/profile'));
+/* ── Mother (and supporter) app ────────────────────────────────────────── */
+const MotherHome = lazy(() => import('@/routes/mother/home'));
+const PregnancyTrackerPage = lazy(() => import('@/routes/mother/pregnancy'));
+const WeeklyGuidePage = lazy(() => import('@/routes/mother/guide'));
+const AppointmentsPage = lazy(() => import('@/routes/mother/appointments'));
+const RemindersPage = lazy(() => import('@/routes/mother/reminders'));
+const BabyPage = lazy(() => import('@/routes/mother/baby'));
+const JournalPage = lazy(() => import('@/routes/mother/journal'));
+const MotherLearnPage = lazy(() => import('@/routes/mother/learn'));
+const MotherFacilitiesPage = lazy(() => import('@/routes/mother/facilities'));
+const MotherMessagesPage = lazy(() => import('@/routes/mother/messages'));
+const MotherEmergencyPage = lazy(() => import('@/routes/mother/emergency'));
+const NotificationsPage = lazy(() => import('@/routes/mother/notifications'));
+const MotherProfilePage = lazy(() => import('@/routes/mother/profile'));
+const MotherSettingsPage = lazy(() => import('@/routes/mother/settings'));
 
+/* ── Healthcare provider portal ────────────────────────────────────────── */
+const ProviderDashboard = lazy(() => import('@/routes/provider/dashboard'));
+const ProviderPatientsPage = lazy(() => import('@/routes/provider/patients'));
+const ProviderAppointments = lazy(() => import('@/routes/provider/appointments'));
+const ProviderEducation = lazy(() => import('@/routes/provider/education'));
+const ProviderMessages = lazy(() => import('@/routes/provider/messages'));
+const ProviderReports = lazy(() => import('@/routes/provider/reports'));
+const ProviderProfile = lazy(() => import('@/routes/provider/profile'));
+
+/* ── Administration ────────────────────────────────────────────────────── */
 const AdminDashboard = lazy(() => import('@/routes/admin/dashboard'));
 const AdminUsers = lazy(() => import('@/routes/admin/users'));
-const AdminUserDetail = lazy(() => import('@/routes/admin/user-detail'));
+const AdminProviders = lazy(() => import('@/routes/admin/providers'));
 const AdminFacilities = lazy(() => import('@/routes/admin/facilities'));
-const AdminSettings = lazy(() => import('@/routes/admin/settings'));
-const AdminAudit = lazy(() => import('@/routes/admin/audit'));
+const AdminArticles = lazy(() => import('@/routes/admin/articles'));
 const AdminAnnouncements = lazy(() => import('@/routes/admin/announcements'));
-const AdminServices = lazy(() => import('@/routes/admin/services'));
+const AdminNotifications = lazy(() => import('@/routes/admin/notifications'));
+const AdminAppointments = lazy(() => import('@/routes/admin/appointments'));
+const AdminReports = lazy(() => import('@/routes/admin/reports'));
+const AdminFeedback = lazy(() => import('@/routes/admin/feedback'));
+const AdminMedia = lazy(() => import('@/routes/admin/media'));
+const AdminAudit = lazy(() => import('@/routes/admin/audit'));
+const AdminSettings = lazy(() => import('@/routes/admin/settings'));
 
-const MotherHome = lazy(() => import('@/routes/mother/home'));
-const MotherAppointments = lazy(() => import('@/routes/mother/appointments'));
-const MotherRecords = lazy(() => import('@/routes/mother/records'));
-const MotherEducation = lazy(() => import('@/routes/mother/education'));
-const MotherNotifications = lazy(() => import('@/routes/mother/notifications'));
-const MotherProfile = lazy(() => import('@/routes/mother/profile'));
+/* Lazy modules that also export named screens are resolved through their module. */
+const PatientDetailPage = lazy(() =>
+  import('@/routes/provider/patients').then((module) => ({ default: module.PatientDetailPage })),
+);
+const LearnCategoryPage = lazy(() =>
+  import('@/routes/public/learn').then((module) => ({ default: module.CategoryPage })),
+);
+const StaticScreens = {
+  About: lazy(() => import('@/routes/public/static').then((m) => ({ default: m.AboutPage }))),
+  HowItWorks: lazy(() => import('@/routes/public/static').then((m) => ({ default: m.HowItWorksPage }))),
+  Faq: lazy(() => import('@/routes/public/static').then((m) => ({ default: m.FaqPage }))),
+  Contact: lazy(() => import('@/routes/public/static').then((m) => ({ default: m.ContactPage }))),
+  Privacy: lazy(() => import('@/routes/public/static').then((m) => ({ default: m.PrivacyPage }))),
+  Terms: lazy(() => import('@/routes/public/static').then((m) => ({ default: m.TermsPage }))),
+  Status: lazy(() => import('@/routes/public/static').then((m) => ({ default: m.StatusPage }))),
+};
 
-export function App() {
+/** Sends a signed-in person to the portal that matches their role. */
+function HomeRedirect() {
+  const { actor, ready } = useSession();
+  if (!ready) return <FullPageSpinner label="Finding your home screen" />;
+  return <Navigate to={homeForRole(actor?.role)} replace />;
+}
+
+/** `/learn/:category` — validates the slug against the known categories. */
+function CategoryRoute() {
+  const { category = '' } = useParams();
+  const known = Object.keys(ARTICLE_CATEGORY_LABELS) as ArticleCategory[];
+  const match = known.find((value) => value === category);
+  if (!match) return <NotFoundPage />;
   return (
-    <ErrorBoundary>
-      <AppProviders>
-        <BrowserRouter>
-          <Suspense fallback={<BootScreen />}>
-            <Routes>
-              {/* Public site — this is the first screen, never a login wall. */}
-              <Route path="/" element={<Landing />} />
-              <Route path="/about" element={<About />} />
-              <Route path="/services" element={<Services />} />
-              <Route path="/how-it-works" element={<HowItWorks />} />
-              <Route path="/for-clinics" element={<ForClinics />} />
-              <Route path="/for-mothers" element={<ForMothers />} />
-              <Route path="/resources" element={<Resources />} />
-              <Route path="/maternal-health" element={<MaternalHealth />} />
-              <Route path="/emergency" element={<Emergency />} />
-              <Route path="/faq" element={<Faq />} />
-              <Route path="/privacy" element={<Privacy />} />
-              <Route path="/contact" element={<Contact />} />
-              <Route path="/status" element={<Status />} />
-
-              <Route
-                path="/signin"
-                element={
-                  <RequireGuest>
-                    <SignIn />
-                  </RequireGuest>
-                }
-              />
-              <Route
-                path="/register"
-                element={
-                  <RequireGuest>
-                    <Register />
-                  </RequireGuest>
-                }
-              />
-              <Route
-                path="/forgot-password"
-                element={
-                  <RequireGuest>
-                    <ForgotPassword />
-                  </RequireGuest>
-                }
-              />
-              <Route
-                path="/reset-password"
-                element={
-                  <RequireGuest>
-                    <ResetPassword />
-                  </RequireGuest>
-                }
-              />
-              <Route path="/pending-approval" element={<PendingApproval />} />
-              {/* Legacy alias kept so an old bookmark still lands somewhere sane. */}
-              <Route path="/login" element={<Navigate to="/signin" replace />} />
-
-              {/* Mother’s portal */}
-              <Route
-                path="/home/*"
-                element={
-                  <RequireAuth roles={['MOTHER']}>
-                    <NavScope nav={MOTHER_NAV} base="/home" tone="mother">
-                      <Routes>
-                        <Route index element={<MotherHome />} />
-                        <Route path="appointments" element={<MotherAppointments />} />
-                        <Route path="records" element={<MotherRecords />} />
-                        <Route path="education" element={<MotherEducation />} />
-                        <Route path="messages" element={<MessagesPage />} />
-                        <Route path="notifications" element={<MotherNotifications />} />
-                        <Route path="profile" element={<MotherProfile />} />
-                        <Route path="*" element={<Navigate to="/home" replace />} />
-                      </Routes>
-                    </NavScope>
-                  </RequireAuth>
-                }
-              />
-
-              {/* Staff workspace */}
-              <Route
-                path="/app/*"
-                element={
-                  <RequireStaff>
-                    <NavScope nav={APP_NAV} base="/app">
-                      <Routes>
-                        <Route index element={<WorkerDashboard />} />
-                        <Route path="mothers" element={<MothersPage />} />
-                        <Route path="mothers/:motherId" element={<MotherProfilePage />} />
-                        <Route path="anc" element={<AncVisitsPage />} />
-                        <Route path="appointments" element={<AppointmentsPage />} />
-                        <Route path="alerts" element={<AlertsPage />} />
-                        <Route path="referrals" element={<ReferralsPage />} />
-                        <Route path="documents" element={<DocumentsPage />} />
-                        <Route path="reports" element={<ReportsPage />} />
-                        <Route path="education" element={<EducationPage />} />
-                        <Route path="messages" element={<MessagesPage />} />
-                        <Route path="notifications" element={<NotificationsPage />} />
-                        <Route path="profile" element={<ProfilePage />} />
-                        <Route path="*" element={<Navigate to="/app" replace />} />
-                      </Routes>
-                    </NavScope>
-                  </RequireStaff>
-                }
-              />
-
-              {/* Administrator console — same screens where they are the same job. */}
-              <Route
-                path="/admin/*"
-                element={
-                  <RequireAuth roles={['ADMIN']}>
-                    <NavScope nav={ADMIN_NAV} base="/admin">
-                      <Routes>
-                        <Route index element={<AdminDashboard />} />
-                        <Route path="users" element={<AdminUsers />} />
-                        <Route path="users/:uid" element={<AdminUserDetail />} />
-                        <Route path="facilities" element={<AdminFacilities />} />
-                        <Route path="settings" element={<AdminSettings />} />
-                        <Route path="audit" element={<AdminAudit />} />
-                        <Route path="mothers" element={<MothersPage />} />
-                        <Route path="mothers/:motherId" element={<MotherProfilePage />} />
-                        <Route path="appointments" element={<AppointmentsPage />} />
-                        <Route path="alerts" element={<AlertsPage />} />
-                        <Route path="referrals" element={<ReferralsPage />} />
-                        <Route path="documents" element={<DocumentsPage />} />
-                        <Route path="reports" element={<ReportsPage />} />
-                        <Route path="education" element={<EducationPage />} />
-                        <Route path="messages" element={<MessagesPage />} />
-                        <Route path="notifications" element={<NotificationsPage />} />
-                        <Route path="announcements" element={<AdminAnnouncements />} />
-                        <Route path="services" element={<AdminServices />} />
-                        <Route path="*" element={<Navigate to="/admin" replace />} />
-                      </Routes>
-                    </NavScope>
-                  </RequireAuth>
-                }
-              />
-
-              <Route path="/forbidden" element={<ForbiddenPage />} />
-              <Route path="*" element={<NotFoundPage />} />
-            </Routes>
-          </Suspense>
-        </BrowserRouter>
-      </AppProviders>
-    </ErrorBoundary>
+    <Suspense fallback={<FullPageSpinner label="Loading this topic" />}>
+      <LearnCategoryPage category={match} />
+    </Suspense>
   );
 }
 
-class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
-  override state: { error: Error | null } = { error: null };
-
-  static getDerivedStateFromError(error: Error): { error: Error } {
-    return { error };
-  }
-
-  override componentDidCatch(error: Error, info: ErrorInfo): void {
-    // Never a bare console.log in a clinical app: this is the hook a deployment
-    // connects to its own error reporting (Sentry, CloudWatch, …).
-    console.error('[mamacare] unhandled interface error', error.message, info.componentStack?.slice(0, 400));
-  }
-
-  override render(): ReactNode {
-    if (!this.state.error) return this.props.children;
-    return (
-      <ServerErrorPage
-        error={this.state.error}
-        onRetry={() => {
-          this.setState({ error: null });
-          window.location.reload();
-        }}
-      />
-    );
-  }
+/** Scrolls to the top on navigation, unless the browser is restoring a position. */
+function ScrollToTop() {
+  const { pathname } = useLocation();
+  useEffect(() => {
+    window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+  }, [pathname]);
+  return null;
 }
 
-export default App;
+function AppRoutes() {
+  return (
+    <Suspense fallback={<FullPageSpinner />}>
+      <Routes>
+        {/* ── Public ─────────────────────────────────────────────── */}
+        <Route path="/" element={<Landing />} />
+        <Route path="/learn" element={<LearnPage />} />
+        <Route path="/learn/category/:category" element={<CategoryRoute />} />
+        <Route path="/learn/:slug" element={<ArticlePage />} />
+        <Route path="/facilities" element={<FacilitiesPage />} />
+        <Route path="/providers" element={<ProvidersPage />} />
+        <Route path="/emergency" element={<EmergencyPage />} />
+        <Route path="/about" element={<StaticScreens.About />} />
+        <Route path="/how-it-works" element={<StaticScreens.HowItWorks />} />
+        <Route path="/faq" element={<StaticScreens.Faq />} />
+        <Route path="/contact" element={<StaticScreens.Contact />} />
+        <Route path="/privacy" element={<StaticScreens.Privacy />} />
+        <Route path="/terms" element={<StaticScreens.Terms />} />
+        <Route path="/status" element={<StaticScreens.Status />} />
+
+        {/* ── Authentication ─────────────────────────────────────── */}
+        <Route
+          path="/sign-in"
+          element={
+            <RedirectIfSignedIn>
+              <SignInPage />
+            </RedirectIfSignedIn>
+          }
+        />
+        <Route
+          path="/register"
+          element={
+            <RedirectIfSignedIn>
+              <RegisterPage />
+            </RedirectIfSignedIn>
+          }
+        />
+        <Route
+          path="/forgot-password"
+          element={
+            <RedirectIfSignedIn>
+              <ForgotPasswordPage />
+            </RedirectIfSignedIn>
+          }
+        />
+        <Route
+          path="/pending"
+          element={
+            <RequireAuth>
+              <PendingApprovalPage />
+            </RequireAuth>
+          }
+        />
+        <Route path="/home" element={<HomeRedirect />} />
+
+        {/* ── Mother and supporter app ───────────────────────────── */}
+        <Route
+          path="/app"
+          element={
+            <RequireAuth roles={['MOTHER', 'SUPPORTER']}>
+              <Suspense fallback={<FullPageSpinner label="Opening your tracker" />}>
+                <Routes>
+                  <Route index element={<MotherHome />} />
+                  <Route path="pregnancy" element={<PregnancyTrackerPage />} />
+                  <Route path="guide" element={<WeeklyGuidePage />} />
+                  <Route path="appointments" element={<AppointmentsPage />} />
+                  <Route path="reminders" element={<RemindersPage />} />
+                  <Route path="baby" element={<BabyPage />} />
+                  <Route path="journal" element={<JournalPage />} />
+                  <Route path="learn" element={<MotherLearnPage />} />
+                  <Route path="facilities" element={<MotherFacilitiesPage />} />
+                  <Route path="messages" element={<MotherMessagesPage />} />
+                  <Route path="emergency" element={<MotherEmergencyPage />} />
+                  <Route path="notifications" element={<NotificationsPage />} />
+                  <Route path="profile" element={<MotherProfilePage />} />
+                  <Route path="settings" element={<MotherSettingsPage />} />
+                  <Route path="*" element={<Navigate to="/app" replace />} />
+                </Routes>
+              </Suspense>
+            </RequireAuth>
+          }
+        />
+
+        {/* ── Healthcare provider portal ─────────────────────────── */}
+        <Route
+          path="/provider"
+          element={
+            <RequireProvider>
+              <Suspense fallback={<FullPageSpinner label="Opening the clinical portal" />}>
+                <Routes>
+                  <Route index element={<ProviderDashboard />} />
+                  <Route path="patients" element={<ProviderPatientsPage />} />
+                  <Route path="patients/:patientId" element={<PatientDetailPage />} />
+                  <Route path="appointments" element={<ProviderAppointments />} />
+                  <Route path="education" element={<ProviderEducation />} />
+                  <Route path="messages" element={<ProviderMessages />} />
+                  <Route path="reports" element={<ProviderReports />} />
+                  <Route path="profile" element={<ProviderProfile />} />
+                  <Route path="*" element={<Navigate to="/provider" replace />} />
+                </Routes>
+              </Suspense>
+            </RequireProvider>
+          }
+        />
+
+        {/* ── Administration ─────────────────────────────────────── */}
+        <Route
+          path="/admin"
+          element={
+            <RequireAdmin>
+              <Suspense fallback={<FullPageSpinner label="Opening administration" />}>
+                <Routes>
+                  <Route index element={<AdminDashboard />} />
+                  <Route
+                    path="users"
+                    element={
+                      <RequireSystemAdmin>
+                        <AdminUsers />
+                      </RequireSystemAdmin>
+                    }
+                  />
+                  <Route
+                    path="providers"
+                    element={
+                      <RequireSystemAdmin>
+                        <AdminProviders />
+                      </RequireSystemAdmin>
+                    }
+                  />
+                  <Route path="facilities" element={<AdminFacilities />} />
+                  <Route path="articles" element={<AdminArticles />} />
+                  <Route path="announcements" element={<AdminAnnouncements />} />
+                  <Route
+                    path="notifications"
+                    element={
+                      <RequireSystemAdmin>
+                        <AdminNotifications />
+                      </RequireSystemAdmin>
+                    }
+                  />
+                  <Route path="appointments" element={<AdminAppointments />} />
+                  <Route path="reports" element={<AdminReports />} />
+                  <Route path="feedback" element={<AdminFeedback />} />
+                  <Route path="media" element={<AdminMedia />} />
+                  <Route
+                    path="audit"
+                    element={
+                      <RequireSystemAdmin>
+                        <AdminAudit />
+                      </RequireSystemAdmin>
+                    }
+                  />
+                  <Route
+                    path="settings"
+                    element={
+                      <RequireSystemAdmin>
+                        <AdminSettings />
+                      </RequireSystemAdmin>
+                    }
+                  />
+                  <Route path="*" element={<Navigate to="/admin" replace />} />
+                </Routes>
+              </Suspense>
+            </RequireAdmin>
+          }
+        />
+
+        {/* ── Everything else ────────────────────────────────────── */}
+        <Route path="*" element={<NotFoundPage />} />
+      </Routes>
+    </Suspense>
+  );
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <AppProviders>
+        <ScrollToTop />
+        <AppRoutes />
+      </AppProviders>
+    </BrowserRouter>
+  );
+}
