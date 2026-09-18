@@ -94,20 +94,20 @@ const INITIAL_PREGNANCY: PregnancyState = {
 const ROLES: { value: Role; title: string; blurb: string; icon: React.ReactNode }[] = [
   {
     value: 'MOTHER',
-    title: 'I am pregnant or a new mother',
-    blurb: 'Track your pregnancy, appointments, medication and your baby.',
+    title: 'Patient / Expectant Mother',
+    blurb: 'Track your pregnancy, clinical appointments, medications, records and your baby.',
     icon: <Baby className="size-5" aria-hidden />,
   },
   {
     value: 'SUPPORTER',
-    title: 'I support a mother',
-    blurb: 'A partner, parent or friend who helps with reminders and visits.',
+    title: 'Family supporter',
+    blurb: 'A partner, parent or family member who helps with reminders and visits.',
     icon: <HandHeart className="size-5" aria-hidden />,
   },
   {
     value: 'PROVIDER',
-    title: 'I am a healthcare provider',
-    blurb: 'Midwife, nurse, doctor or community health worker. Verified by an administrator.',
+    title: 'Healthcare provider / Nurse',
+    blurb: 'Midwife, nurse, or clinical officer. Application verified by an administrator before access.',
     icon: <Stethoscope className="size-5" aria-hidden />,
   },
 ];
@@ -515,42 +515,71 @@ export default function RegisterPage() {
           ) : null}
 
           {state.role === 'MOTHER' ? (
-            <Card className="card-pad">
-              <h2 className="card-title">Emergency contact (optional)</h2>
-              <p className="mt-1 text-xs text-ink-600">
-                Someone a facility can call if you cannot be reached. Stored privately in your record.
-              </p>
-              <div className="mt-4 space-y-4">
-                <FieldGrid columns={2}>
-                  <Field label="Name" htmlFor="emergencyName" optional>
-                    <TextInput
-                      id="emergencyName"
-                      placeholder="e.g. Bwalya Mwansa"
-                      value={state.emergencyName}
-                      onValueChange={(value) => set('emergencyName', value)}
+            <>
+              <Card className="card-pad border-brand-200 bg-brand-50/40">
+                <h2 className="card-title">Primary health facility</h2>
+                <p className="mt-1 text-xs text-ink-600">
+                  Select the clinic or hospital you visit for antenatal care and delivery.
+                </p>
+                <div className="mt-3">
+                  <Field label="Your health facility" htmlFor="patientFacilityId" optional>
+                    <Select
+                      id="patientFacilityId"
+                      value={state.facilityId}
+                      onChange={(event) => {
+                        const selected = facilityList.find((f) => f.id === event.target.value);
+                        set('facilityId', event.target.value);
+                        set('facilityName', selected ? selected.name : '');
+                      }}
+                      options={[
+                        { value: '', label: 'Select your local clinic or hospital (e.g. Chama District Hospital)' },
+                        ...facilityList.map((facility) => ({
+                          value: facility.id,
+                          label: `${facility.name} — ${facility.district || facility.city} (${facility.level || (facility.type === 'government-hospital' ? 'Hospital' : 'Health Centre')})`,
+                        })),
+                      ]}
                     />
                   </Field>
-                  <Field label="Relationship" htmlFor="emergencyRelationship" optional>
+                </div>
+              </Card>
+
+              <Card className="card-pad">
+                <h2 className="card-title">Emergency contact (optional)</h2>
+                <p className="mt-1 text-xs text-ink-600">
+                  Someone a facility can call if you cannot be reached. Stored privately in your record.
+                </p>
+                <div className="mt-4 space-y-4">
+                  <FieldGrid columns={2}>
+                    <Field label="Name" htmlFor="emergencyName" optional>
+                      <TextInput
+                        id="emergencyName"
+                        placeholder="e.g. Bwalya Mwansa"
+                        value={state.emergencyName}
+                        onValueChange={(value) => set('emergencyName', value)}
+                      />
+                    </Field>
+                    <Field label="Relationship" htmlFor="emergencyRelationship" optional>
+                      <TextInput
+                        id="emergencyRelationship"
+                        placeholder="e.g. Husband"
+                        value={state.emergencyRelationship}
+                        onValueChange={(value) => set('emergencyRelationship', value)}
+                      />
+                    </Field>
+                  </FieldGrid>
+                  <Field label="Phone" htmlFor="emergencyPhone" optional>
                     <TextInput
-                      id="emergencyRelationship"
-                      placeholder="e.g. Husband"
-                      value={state.emergencyRelationship}
-                      onValueChange={(value) => set('emergencyRelationship', value)}
+                      id="emergencyPhone"
+                      type="tel"
+                      inputMode="tel"
+                      placeholder="+260 97 000 0000"
+                      value={state.emergencyPhone}
+                      onValueChange={(value) => set('emergencyPhone', value)}
                     />
                   </Field>
-                </FieldGrid>
-                <Field label="Phone" htmlFor="emergencyPhone" optional>
-                  <TextInput
-                    id="emergencyPhone"
-                    type="tel"
-                    inputMode="tel"
-                    placeholder="+260 97 000 0000"
-                    value={state.emergencyPhone}
-                    onValueChange={(value) => set('emergencyPhone', value)}
-                  />
-                </Field>
-              </div>
-            </Card>
+                </div>
+              </Card>
+            </>
           ) : null}
         </div>
       ) : null}
@@ -678,11 +707,11 @@ export default function RegisterPage() {
                 ['Registering as', ROLES.find((role) => role.value === state.role)?.title ?? state.role],
                 ['Phone', state.phone || 'Not provided'],
                 ['Country', COUNTRIES.find((country) => country.code === state.country)?.name ?? state.country],
+                ...(state.facilityName ? ([['Facility', state.facilityName]] as [string, string][]) : []),
                 ...(state.role === 'PROVIDER'
                   ? ([
                       ['Profession', state.profession ? PROFESSION_LABELS[state.profession] : ''],
                       ['Licence', state.licenseNumber],
-                      ['Facility', state.facilityName || 'Not provided'],
                     ] as [string, string][])
                   : []),
                 ...(state.role === 'MOTHER' && preview

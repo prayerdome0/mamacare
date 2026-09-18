@@ -3,7 +3,7 @@
   "private": true,
   "version": "3.0.0",
   "type": "module",
-  "description": "MAMA CARE \u2014 maternal health platform (public site + role dashboards) on Firebase + Cloudinary",
+  "description": "MAMA CARE — maternal health platform (public site + role dashboards) on Firebase + Cloudinary",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit -p tsconfig.json && vite build",
@@ -15,6 +15,7 @@
   "dependencies": {
     "clsx": "^2.1.1",
     "firebase": "^12.19.0",
+    "jspdf": "^4.2.1",
     "lucide-react": "^0.545.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",

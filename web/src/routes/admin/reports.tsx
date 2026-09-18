@@ -1,39 +1,56 @@
 /**
- * Administrator — content reports.
+ * Administrator Reports Portal.
  *
- * When a mother taps “report a problem” on an article, a facility or a message, it
- * lands here. A report is a claim that something in the platform is wrong or unsafe,
- * so the workflow always ends with a written resolution: what was checked and what
- * was decided. Dismissing without a reason is the fastest way to stop people
- * reporting things.
+ * Two main operational views:
+ *  1. Official Healthcare Reports:
+ *     - Master registry of all clinical reports (Antenatal, Clinical, Postnatal, Immunization, Referrals)
+ *     - Full search by patient name, ID, report #, facility, report type, date, status
+ *     - Instant PDF preview, print, and download
+ *  2. Content Moderation Reports:
+ *     - Flagged articles, facilities, messages, and user reports requiring admin decision
  */
 
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   CheckCircle2,
+  Download,
+  Eye,
   EyeOff,
+  FileCheck2,
+  FileText,
   Flag,
+  HeartPulse,
   Newspaper,
+  Printer,
   RefreshCw,
+  Search,
   ShieldAlert,
+  Trash2,
   Wrench,
 } from 'lucide-react';
 import { useAsync } from '@/hooks';
-import { reportRepo } from '@/services/repositories';
+import { healthcareReportRepo, reportRepo } from '@/services/repositories';
 import { logAudit } from '@/services/audit';
 import { useConfirm, useSession } from '@/providers/app-providers';
 import { formatDate, relativeTime, toCsv, toIsoDate, downloadBlob, truncate } from '@/lib/utils';
-import type { ContentReport, ReportTargetType } from '@/types/domain';
+import { downloadHealthcareReportPdf, printHealthcareReportPdf } from '@/lib/pdf-report';
+import {
+  HEALTHCARE_REPORT_TYPE_LABELS,
+  type ContentReport,
+  type HealthcareReport,
+  type ReportTargetType,
+} from '@/types/domain';
 import { StaffPageHeader, StaffShell } from '@/components/layout/staff-shell';
 import { Button } from '@/components/ui/button';
 import { Card, KeyValue, SectionHeading, StatCard } from '@/components/ui/card';
 import { Badge, EmptyState, ErrorState, LoadingRows } from '@/components/ui/display';
-import { Field, Select, TextArea } from '@/components/ui/form';
+import { Field, SearchInput, Select, TextArea } from '@/components/ui/form';
 import { Modal } from '@/components/ui/overlay';
 import { DataTable, type Column } from '@/components/ui/table';
 import { SegmentedControl } from '@/components/ui/tabs';
 import { useToast } from '@/components/ui/toast';
+import { ReportPreviewModal } from '@/components/reports/report-preview-modal';
 
 const TARGET_LABELS: Record<ReportTargetType, string> = {
   article: 'Article',
@@ -62,48 +79,106 @@ export default function AdminReports() {
   const { actor } = useSession();
   const toast = useToast();
   const confirm = useConfirm();
+
+  const [mainTab, setMainTab] = useState<'healthcare' | 'moderation'>('healthcare');
+
+  // Healthcare reports state
+  const [hcSearch, setHcSearch] = useState('');
+  const [hcTypeFilter, setHcTypeFilter] = useState('ALL');
+  const [previewReport, setPreviewReport] = useState<HealthcareReport | null>(null);
+
+  // Moderation state
   const [status, setStatus] = useState<ContentReport['status'] | 'ALL'>('open');
   const [targetType, setTargetType] = useState<ReportTargetType | 'ALL'>('ALL');
   const [selected, setSelected] = useState<ContentReport | null>(null);
 
-  const { data, loading, error, retryable, run } = useAsync(() => reportRepo.all(), { immediate: true });
-  const rows = useMemo<ContentReport[]>(() => data ?? [], [data]);
+  const {
+    data: hcReportsData,
+    loading: hcLoading,
+    run: reloadHcReports,
+  } = useAsync(() => healthcareReportRepo.all(500), { immediate: true });
 
-  const filtered = useMemo(
+  const {
+    data: modData,
+    loading: modLoading,
+    error: modError,
+    retryable: modRetryable,
+    run: reloadModReports,
+  } = useAsync(() => reportRepo.all(), { immediate: true });
+
+  const hcReports = useMemo<HealthcareReport[]>(() => hcReportsData ?? [], [hcReportsData]);
+  const modRows = useMemo<ContentReport[]>(() => modData ?? [], [modData]);
+
+  // Healthcare reports filtering
+  const filteredHcReports = useMemo(() => {
+    const term = hcSearch.trim().toLowerCase();
+    return hcReports.filter((r) => {
+      if (hcTypeFilter !== 'ALL' && r.reportType !== hcTypeFilter) return false;
+      if (!term) return true;
+      return (
+        r.patientName.toLowerCase().includes(term) ||
+        r.patientId.toLowerCase().includes(term) ||
+        r.reportNumber.toLowerCase().includes(term) ||
+        r.facilityName.toLowerCase().includes(term) ||
+        r.title.toLowerCase().includes(term)
+      );
+    });
+  }, [hcReports, hcSearch, hcTypeFilter]);
+
+  // Moderation filtering
+  const filteredModRows = useMemo(
     () =>
-      rows.filter((report) => {
+      modRows.filter((report) => {
         if (status !== 'ALL' && report.status !== status) return false;
         if (targetType !== 'ALL' && report.targetType !== targetType) return false;
         return true;
       }),
-    [rows, status, targetType],
+    [modRows, status, targetType],
   );
 
-  const counts = useMemo(
+  const modCounts = useMemo(
     () => ({
-      total: rows.length,
-      open: rows.filter((report) => report.status === 'open').length,
-      reviewed: rows.filter((report) => report.status === 'reviewed').length,
-      actioned: rows.filter((report) => report.status === 'actioned').length,
-      dismissed: rows.filter((report) => report.status === 'dismissed').length,
-      safety: rows.filter((report) => /danger|unsafe|wrong|harm|medic/i.test(`${report.reason} ${report.details ?? ''}`)).length,
-      oldest: rows
+      total: modRows.length,
+      open: modRows.filter((report) => report.status === 'open').length,
+      reviewed: modRows.filter((report) => report.status === 'reviewed').length,
+      actioned: modRows.filter((report) => report.status === 'actioned').length,
+      dismissed: modRows.filter((report) => report.status === 'dismissed').length,
+      safety: modRows.filter((report) => /danger|unsafe|wrong|harm|medic/i.test(`${report.reason} ${report.details ?? ''}`)).length,
+      oldest: modRows
         .filter((report) => report.status === 'open')
         .map((report) => report.createdAt)
         .filter(Boolean)
         .sort()[0] ?? null,
     }),
-    [rows],
+    [modRows],
   );
 
   useEffect(() => {
-    document.title = 'Reports · Mama Care admin';
+    document.title = 'Reports Management · Mama Care admin';
   }, []);
 
-  const exportCsv = async (): Promise<void> => {
+  const handleDeleteHcReport = async (report: HealthcareReport, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const ok = await confirm({
+      title: 'Delete this healthcare report?',
+      message: `Are you sure you want to delete #${report.reportNumber} for ${report.patientName}? This action is logged.`,
+      confirmLabel: 'Delete report',
+    });
+    if (!ok) return;
+
+    try {
+      await healthcareReportRepo.remove(report.id);
+      toast.success('Report deleted');
+      void reloadHcReports();
+    } catch {
+      toast.error('Could not delete report');
+    }
+  };
+
+  const exportModerationCsv = async (): Promise<void> => {
     const csv = toCsv(
       ['Reported', 'Type', 'Target', 'Reason', 'Details', 'Status', 'Reporter', 'Reviewed by', 'Resolution', 'Date'],
-      rows.map((report) => [
+      modRows.map((report) => [
         report.createdAt ?? '',
         TARGET_LABELS[report.targetType],
         report.targetLabel,
@@ -116,12 +191,12 @@ export default function AdminReports() {
         report.reviewedAt ?? '',
       ]),
     );
-    downloadBlob(new Blob([csv], { type: 'text/csv;charset=utf-8' }), `mamacare-reports-${toIsoDate(new Date())}.csv`);
-    await logAudit('data-export', 'reports', actor?.uid ?? null, `Exported ${rows.length} reports`);
+    downloadBlob(new Blob([csv], { type: 'text/csv;charset=utf-8' }), `mamacare-mod-reports-${toIsoDate(new Date())}.csv`);
+    await logAudit('data-export', 'reports', actor?.uid ?? null, `Exported ${modRows.length} moderation reports`);
     toast.success('Export ready');
   };
 
-  const columns: Column<ContentReport>[] = [
+  const modColumns: Column<ContentReport>[] = [
     {
       key: 'target',
       header: 'Reported item',
@@ -196,135 +271,280 @@ export default function AdminReports() {
   return (
     <StaffShell portal="Admin Dashboard">
       <StaffPageHeader
-        title="Content reports"
-        description="Things users flagged as wrong, unsafe or out of date. Every report needs a decision and a written reason."
+        title="Reports Management"
+        description="Inspect and search official healthcare reports across facilities, or moderate community problem reports."
         actions={
-          <>
-            <Button variant="ghost" size="sm" onClick={() => void run()} icon={<RefreshCw className="size-4" aria-hidden />}>
-              Refresh
-            </Button>
-            <Button variant="secondary" size="sm" onClick={() => void exportCsv()} disabled={rows.length === 0}>
-              Export CSV
-            </Button>
-          </>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              void reloadHcReports();
+              void reloadModReports();
+            }}
+            icon={<RefreshCw className="size-4" aria-hidden />}
+          >
+            Refresh
+          </Button>
         }
       />
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <StatCard label="Open" value={counts.open} icon={<Flag className="size-4" aria-hidden />} tone={counts.open > 0 ? 'red' : 'green'} onClick={() => setStatus('open')} />
-        <StatCard label="Reviewed" value={counts.reviewed} icon={<EyeOff className="size-4" aria-hidden />} onClick={() => setStatus('reviewed')} />
-        <StatCard label="Action taken" value={counts.actioned} icon={<Wrench className="size-4" aria-hidden />} tone="green" onClick={() => setStatus('actioned')} />
-        <StatCard
-          label="Possible safety issues"
-          value={counts.safety}
-          icon={<ShieldAlert className="size-4" aria-hidden />}
-          tone={counts.safety > 0 ? 'amber' : 'default'}
-          hint="Keyword match — always read it yourself"
-          onClick={() => setStatus('ALL')}
+      {/* Main Tabs */}
+      <Card className="card-pad mb-5">
+        <SegmentedControl
+          value={mainTab}
+          onChange={setMainTab}
+          ariaLabel="Admin Report View Selection"
+          options={[
+            {
+              value: 'healthcare',
+              label: 'Official Healthcare Reports',
+              count: hcReports.length,
+            },
+            {
+              value: 'moderation',
+              label: 'Content Moderation Reports',
+              count: modCounts.open > 0 ? modCounts.open : modCounts.total,
+            },
+          ]}
         />
-      </div>
+      </Card>
 
-      {counts.open > 0 && counts.oldest ? (
-        <Card className="card-pad mt-4 border-[var(--color-risk-red-border)] bg-[var(--color-risk-red-soft)]">
-          <p className="text-sm text-ink-700">
-            The oldest open report was filed {relativeTime(counts.oldest)}. A report that sits unanswered teaches people that
-            reporting is pointless — decide it, even if the decision is “dismissed, details correct as published”.
-          </p>
-        </Card>
+      {/* ── TAB 1: Official Healthcare Reports ──────────────────────── */}
+      {mainTab === 'healthcare' ? (
+        <div className="space-y-5">
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <StatCard
+              label="Total clinical reports"
+              value={hcReports.length}
+              icon={<FileCheck2 className="size-4" aria-hidden />}
+              tone="brand"
+            />
+            <StatCard
+              label="Antenatal summaries"
+              value={hcReports.filter((r) => r.reportType === 'antenatal-summary').length}
+              icon={<HeartPulse className="size-4" aria-hidden />}
+            />
+            <StatCard
+              label="Facilities represented"
+              value={new Set(hcReports.map((r) => r.facilityId)).size}
+              icon={<Newspaper className="size-4" aria-hidden />}
+              tone="green"
+            />
+            <StatCard
+              label="Patients covered"
+              value={new Set(hcReports.map((r) => r.patientId)).size}
+              icon={<FileText className="size-4" aria-hidden />}
+            />
+          </div>
+
+          {/* Search & Filter Bar */}
+          <Card className="card-pad">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex-1">
+                <SearchInput
+                  placeholder="Search by patient name, ID, report # or facility…"
+                  value={hcSearch}
+                  onValueChange={setHcSearch}
+                />
+              </div>
+
+              <div className="w-full sm:w-64">
+                <Select
+                  aria-label="Filter report type"
+                  value={hcTypeFilter}
+                  onChange={(e) => setHcTypeFilter(e.target.value)}
+                  options={[
+                    { value: 'ALL', label: 'All Report Types' },
+                    ...Object.entries(HEALTHCARE_REPORT_TYPE_LABELS).map(([val, label]) => ({
+                      value: val,
+                      label,
+                    })),
+                  ]}
+                />
+              </div>
+            </div>
+          </Card>
+
+          {hcLoading ? <LoadingRows rows={4} /> : null}
+
+          {!hcLoading && hcReports.length === 0 ? (
+            <EmptyState
+              icon={<FileText className="size-8 text-brand-700" aria-hidden />}
+              title="No healthcare reports on record"
+              description="Clinical reports generated by nurses and healthcare providers across facilities will appear here."
+            />
+          ) : null}
+
+          {!hcLoading && hcReports.length > 0 && filteredHcReports.length === 0 ? (
+            <EmptyState
+              icon={<Search className="size-8 text-ink-400" aria-hidden />}
+              title="No reports match your search criteria"
+              description="Try adjusting your search terms or clearing the filter."
+            />
+          ) : null}
+
+          {!hcLoading && filteredHcReports.length > 0 ? (
+            <div className="space-y-3">
+              {filteredHcReports.map((report) => (
+                <Card
+                  key={report.id}
+                  className="card-pad cursor-pointer transition-shadow hover:shadow-md"
+                  onClick={() => setPreviewReport(report)}
+                >
+                  <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="flex items-start gap-3">
+                      <div className="grid size-11 place-items-center rounded-xl bg-brand-50 text-brand-700 ring-1 ring-brand-200 shrink-0">
+                        <FileCheck2 className="size-6" aria-hidden />
+                      </div>
+                      <div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <h3 className="text-base font-bold text-ink-950">{report.title}</h3>
+                          <Badge tone="brand">#{report.reportNumber}</Badge>
+                          <Badge tone="neutral">{report.patientName}</Badge>
+                          <Badge tone="green">{report.status.toUpperCase()}</Badge>
+                        </div>
+                        <p className="mt-1 text-xs text-ink-600">
+                          {report.facilityName} · Patient ID: <strong className="font-mono text-ink-800">{report.patientId}</strong>
+                        </p>
+                        <p className="mt-0.5 text-xs text-ink-500">
+                          Issued {report.createdAt ? formatDate(report.createdAt, 'long') : 'Recently'} · Prepared by {report.generatedByName} ({report.generatedByRole})
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2 self-start sm:self-center">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setPreviewReport(report);
+                        }}
+                        icon={<Eye className="size-4" aria-hidden />}
+                      >
+                        Preview
+                      </Button>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          printHealthcareReportPdf(report);
+                        }}
+                        icon={<Printer className="size-4" aria-hidden />}
+                      >
+                        Print
+                      </Button>
+                      <Button
+                        variant="primary"
+                        size="sm"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          downloadHealthcareReportPdf(report);
+                        }}
+                        icon={<Download className="size-4" aria-hidden />}
+                      >
+                        Download PDF
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={(e) => void handleDeleteHcReport(report, e)}
+                        icon={<Trash2 className="size-4 text-red-600" aria-hidden />}
+                        aria-label="Delete report"
+                      />
+                    </div>
+                  </div>
+                </Card>
+              ))}
+            </div>
+          ) : null}
+        </div>
       ) : null}
 
-      <Card className="card-pad mt-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <SegmentedControl
-            value={status}
-            onChange={setStatus}
-            ariaLabel="Report status"
-            options={[
-              { value: 'open', label: 'Open', count: counts.open },
-              { value: 'reviewed', label: 'Reviewed', count: counts.reviewed },
-              { value: 'actioned', label: 'Actioned', count: counts.actioned },
-              { value: 'dismissed', label: 'Dismissed', count: counts.dismissed },
-              { value: 'ALL', label: 'All', count: counts.total },
-            ]}
-          />
-          <Select
-            aria-label="Filter by reported type"
-            value={targetType}
-            onChange={(event) => setTargetType(event.target.value as ReportTargetType | 'ALL')}
-            options={[
-              { value: 'ALL', label: 'All types' },
-              ...(Object.keys(TARGET_LABELS) as ReportTargetType[]).map((value) => ({ value, label: TARGET_LABELS[value] })),
-            ]}
-            className="w-auto min-w-[11rem]"
-          />
-        </div>
-      </Card>
-
-      <Card className="card-pad mt-4">
-        {error ? <ErrorState title="Reports could not be loaded" message={error} onRetry={retryable ? run : undefined} /> : null}
-        {loading ? <LoadingRows rows={5} /> : null}
-        {!loading && !error ? (
-          <DataTable
-            rows={filtered}
-            columns={columns}
-            rowKey={(row) => row.id}
-            caption="Content reports, newest first"
-            pageSize={20}
-            emptyTitle={counts.total === 0 ? 'Nothing has been reported' : 'No reports match'}
-            emptyDescription={
-              counts.total === 0
-                ? 'That is either good news or a sign nobody has found the report button. Check it is reachable on article and facility pages.'
-                : 'Try another status or type.'
-            }
-          />
-        ) : null}
-      </Card>
-
-      <div className="mt-4 grid gap-4 lg:grid-cols-2">
-        <Card className="card-pad">
-          <SectionHeading eyebrow="Triage" title="How to decide a report" />
-          <ol className="mt-2 list-decimal space-y-1.5 pl-5 text-sm text-ink-700">
-            <li>Read it against the source. A reported article is usually a factual or currency problem.</li>
-            <li>If it concerns clinical guidance, check current national guidance before you change anything.</li>
-            <li>Correct the content, then mark “Action taken” with what you changed and the date you checked.</li>
-            <li>If the report is mistaken, dismiss it with the reason — the reporter's concern is still information.</li>
-            <li>If it names a person's safety, treat it as urgent and involve the facility, not just this queue.</li>
-          </ol>
-        </Card>
-        <Card className="card-pad">
-          <SectionHeading eyebrow="Volume" title="What gets reported" />
-          <ul className="mt-2 space-y-1.5">
-            {(Object.keys(TARGET_LABELS) as ReportTargetType[]).map((type) => {
-              const count = rows.filter((report) => report.targetType === type).length;
-              return (
-                <li key={type} className="flex items-center justify-between gap-3 text-sm">
-                  <span className="text-ink-700">{TARGET_LABELS[type]}</span>
-                  <Badge tone={count > 0 ? 'neutral' : 'neutral'}>{count}</Badge>
-                </li>
-              );
-            })}
-          </ul>
-          <p className="mt-3 text-xs text-ink-500">
-            Facility reports are the most valuable kind: they mean a phone number or opening hour is wrong and somebody was
-            about to travel on it. Fix those first.
-          </p>
-          <div className="mt-3">
-            <Link to="/admin/facilities" className="btn btn-secondary btn-sm">
-              <Newspaper className="size-4" aria-hidden />
-              Open facility directory
-            </Link>
+      {/* ── TAB 2: Content Moderation Reports ──────────────────────── */}
+      {mainTab === 'moderation' ? (
+        <div className="space-y-5">
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <StatCard label="Open" value={modCounts.open} icon={<Flag className="size-4" aria-hidden />} tone={modCounts.open > 0 ? 'red' : 'green'} onClick={() => setStatus('open')} />
+            <StatCard label="Reviewed" value={modCounts.reviewed} icon={<EyeOff className="size-4" aria-hidden />} onClick={() => setStatus('reviewed')} />
+            <StatCard label="Action taken" value={modCounts.actioned} icon={<Wrench className="size-4" aria-hidden />} tone="green" onClick={() => setStatus('actioned')} />
+            <StatCard
+              label="Possible safety issues"
+              value={modCounts.safety}
+              icon={<ShieldAlert className="size-4" aria-hidden />}
+              tone={modCounts.safety > 0 ? 'amber' : 'default'}
+              hint="Keyword match — always read it yourself"
+              onClick={() => setStatus('ALL')}
+            />
           </div>
-        </Card>
-      </div>
 
+          <Card className="card-pad">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <SegmentedControl
+                value={status}
+                onChange={setStatus}
+                ariaLabel="Report status"
+                options={[
+                  { value: 'open', label: 'Open', count: modCounts.open },
+                  { value: 'reviewed', label: 'Reviewed', count: modCounts.reviewed },
+                  { value: 'actioned', label: 'Actioned', count: modCounts.actioned },
+                  { value: 'dismissed', label: 'Dismissed', count: modCounts.dismissed },
+                  { value: 'ALL', label: 'All', count: modCounts.total },
+                ]}
+              />
+              <div className="flex items-center gap-2">
+                <Select
+                  aria-label="Filter by reported type"
+                  value={targetType}
+                  onChange={(event) => setTargetType(event.target.value as ReportTargetType | 'ALL')}
+                  options={[
+                    { value: 'ALL', label: 'All types' },
+                    ...(Object.keys(TARGET_LABELS) as ReportTargetType[]).map((value) => ({ value, label: TARGET_LABELS[value] })),
+                  ]}
+                  className="w-auto min-w-[11rem]"
+                />
+                <Button variant="secondary" size="sm" onClick={() => void exportModerationCsv()} disabled={modRows.length === 0}>
+                  Export CSV
+                </Button>
+              </div>
+            </div>
+          </Card>
+
+          <Card className="card-pad">
+            {modError ? <ErrorState title="Reports could not be loaded" message={modError} onRetry={modRetryable ? reloadModReports : undefined} /> : null}
+            {modLoading ? <LoadingRows rows={5} /> : null}
+            {!modLoading && !modError ? (
+              <DataTable
+                rows={filteredModRows}
+                columns={modColumns}
+                rowKey={(row) => row.id}
+                caption="Content reports, newest first"
+                pageSize={20}
+                emptyTitle={modCounts.total === 0 ? 'Nothing has been reported' : 'No reports match'}
+                emptyDescription="Try another status or type filter."
+              />
+            ) : null}
+          </Card>
+        </div>
+      ) : null}
+
+      {/* Review Content Modal */}
       <ReviewModal
         report={selected}
         onClose={() => setSelected(null)}
         onDone={() => {
           setSelected(null);
           toast.success('Report updated');
-          void run();
+          void reloadModReports();
         }}
+      />
+
+      {/* Healthcare Report Preview Modal */}
+      <ReportPreviewModal
+        report={previewReport}
+        open={Boolean(previewReport)}
+        onClose={() => setPreviewReport(null)}
       />
     </StaffShell>
   );
@@ -364,7 +584,7 @@ function ReviewModal({
     if (nextStatus === 'dismissed') {
       const ok = await confirm({
         title: 'Dismiss this report?',
-        message: 'The reporter is not notified. Your reason is stored, so if the same thing is reported again you can see what was already decided.',
+        message: 'The reporter is not notified. Your reason is stored so history is preserved.',
         confirmLabel: 'Dismiss report',
       });
       if (!ok) return;
@@ -423,16 +643,11 @@ function ReviewModal({
           <Link to={TARGET_LINKS[report.targetType] as string} className="btn btn-secondary btn-sm">
             Open the {TARGET_LABELS[report.targetType].toLowerCase()} record
           </Link>
-        ) : (
-          <p className="text-xs text-ink-500">
-            This report type has no admin screen — messages and accounts are handled through the relevant portal, and the
-            reporter's description is the main evidence you have.
-          </p>
-        )}
+        ) : null}
 
-        <Field label="Decision" htmlFor="rr-status">
+        <Field label="Decision" htmlFor="adm-rr-status">
           <Select
-            id="rr-status"
+            id="adm-rr-status"
             value={nextStatus}
             onChange={(event) => setNextStatus(event.target.value as ContentReport['status'])}
             options={[
@@ -443,8 +658,8 @@ function ReviewModal({
             ]}
           />
         </Field>
-        <Field label="Resolution" htmlFor="rr-resolution" required error={error ?? undefined} hint="What you checked, what you changed, and against which guidance.">
-          <TextArea id="rr-resolution" rows={4} value={resolution} onChange={(event) => setResolution(event.target.value)} placeholder="Checked against the 2024 ZMoH ANC guidelines; the visit interval on week 30 was outdated and has been corrected. Re-published 12 March." />
+        <Field label="Resolution" htmlFor="adm-rr-resolution" required error={error ?? undefined} hint="What was checked and what was decided.">
+          <TextArea id="adm-rr-resolution" rows={4} value={resolution} onChange={(event) => setResolution(event.target.value)} placeholder="Checked against clinical guidelines and updated accordingly." />
         </Field>
       </div>
     </Modal>

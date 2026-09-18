@@ -39,7 +39,9 @@ const ROLE_TONES: Record<AuditLogEntry['actorRole'], 'purple' | 'brand' | 'blue'
   ADMIN: 'purple',
   FACILITY_ADMIN: 'blue',
   PROVIDER: 'brand',
+  NURSE: 'brand',
   MOTHER: 'neutral',
+  PATIENT: 'neutral',
   SUPPORTER: 'neutral',
   SYSTEM: 'neutral',
 };

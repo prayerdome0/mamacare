@@ -16,6 +16,8 @@ import {
   Bell,
   BookOpen,
   CalendarDays,
+  ClipboardList,
+  FileText,
   Heart,
   Home,
   Hospital,
@@ -47,6 +49,8 @@ interface NavItem {
 
 export const MOTHER_NAV: NavItem[] = [
   { to: '/app', label: 'Home', icon: Home, group: 'today' },
+  { to: '/app/records', label: 'Health records', icon: ClipboardList, group: 'journey' },
+  { to: '/app/reports', label: 'Reports', icon: FileText, group: 'journey' },
   { to: '/app/pregnancy', label: 'Pregnancy', icon: Heart, group: 'journey' },
   { to: '/app/guide', label: 'Weekly guide', icon: BookOpen, group: 'journey' },
   { to: '/app/appointments', label: 'Appointments', icon: CalendarDays, group: 'journey' },

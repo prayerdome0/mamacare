@@ -336,6 +336,7 @@ const HUMAN: Partial<Record<CollectionName, string>> = {
   journal: 'journal entries',
   articles: 'health education',
   facilities: 'facilities',
+  healthFacilities: 'health facilities',
   providers: 'provider profiles',
   messages: 'messages',
   notifications: 'notifications',

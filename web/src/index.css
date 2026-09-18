@@ -551,6 +551,32 @@
   }
 }
 
+/* Subtle, organic hero ambient lighting */
+.hero-ambient-glow {
+  position: absolute;
+  top: -20%;
+  right: -10%;
+  width: 500px;
+  height: 500px;
+  border-radius: 9999px;
+  background: radial-gradient(circle, rgba(13, 148, 136, 0.08) 0%, rgba(45, 212, 191, 0.03) 55%, transparent 70%);
+  pointer-events: none;
+  animation: hero-glow-drift 16s ease-in-out infinite alternate;
+  will-change: transform;
+}
+
+@keyframes hero-glow-drift {
+  0% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(-30px, 20px, 0) scale(1.06);
+  }
+  100% {
+    transform: translate3d(20px, -20px, 0) scale(0.96);
+  }
+}
+
 /* The brand mark's heart gives a soft double-beat, like a real pulse.
  * Transform-only; disabled by the reduced-motion block. */
 .mark-beat {

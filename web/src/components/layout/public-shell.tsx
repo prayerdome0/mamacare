@@ -189,9 +189,11 @@ export function PublicHero({
   image?: ReactNode;
 }) {
   return (
-    <section className="overflow-hidden border-b border-ink-200 bg-gradient-to-b from-brand-50/70 to-white">
+    <section className="relative overflow-hidden border-b border-ink-200 bg-gradient-to-b from-brand-50/70 to-white">
+      <div className="hero-ambient-glow" aria-hidden="true" />
+      <div className="hero-ambient-glow" style={{ left: '-15%', top: '30%', width: '400px', height: '400px', animationDelay: '-6s' }} aria-hidden="true" />
       <VitalsBand />
-      <div className={cn('shell grid items-center gap-10 py-14 sm:py-16', image ? 'lg:grid-cols-2' : '')}>
+      <div className={cn('shell relative z-10 grid items-center gap-10 py-14 sm:py-16', image ? 'lg:grid-cols-2' : '')}>
         <div>
           {eyebrow ? <p className="section-eyebrow">{eyebrow}</p> : null}
           <h1 className="display mt-3">{title}</h1>

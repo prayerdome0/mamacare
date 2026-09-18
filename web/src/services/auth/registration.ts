@@ -29,7 +29,7 @@ import type { Actor } from '@/services/data/contract';
 import { DEFAULT_NOTIFICATION_PREFS } from '@/types/domain';
 import type { HealthcareProvider, LanguageCode, Profession, Role, UserProfile } from '@/types/domain';
 
-export const SELF_SERVICE_ROLES: Role[] = ['MOTHER', 'SUPPORTER', 'PROVIDER'];
+export const SELF_SERVICE_ROLES: Role[] = ['MOTHER', 'PATIENT', 'SUPPORTER', 'PROVIDER', 'NURSE'];
 
 export const registrationSchema = z
   .object({
@@ -41,13 +41,13 @@ export const registrationSchema = z
     dateOfBirth: z.string().trim().optional().or(z.literal('')),
     country: z.string().min(2),
     language: z.enum(['en', 'bem', 'ny', 'toi', 'loz']),
-    role: z.enum(['MOTHER', 'SUPPORTER', 'PROVIDER']),
+    role: z.enum(['MOTHER', 'PATIENT', 'SUPPORTER', 'PROVIDER', 'NURSE']),
     emergencyName: z.string().trim().optional().or(z.literal('')),
     emergencyPhone: z.string().trim().optional().or(z.literal('')),
     emergencyRelationship: z.string().trim().optional().or(z.literal('')),
     // supporter
     supportsEmail: z.string().trim().optional().or(z.literal('')),
-    // provider
+    // provider / nurse
     profession: z
       .enum(['midwife', 'nurse', 'doctor', 'maternal-educator', 'community-health-worker', 'pharmacist'])
       .optional(),
@@ -103,6 +103,9 @@ export async function register(input: RegistrationInput, options: RegisterOption
   const countryCode = COUNTRIES.some((country) => country.code === parsed.country) ? parsed.country : 'ZM';
   const requiresApproval = settings ? settings.providerApprovalsRequired !== false : true;
 
+  const isStaffRole = parsed.role === 'PROVIDER' || parsed.role === 'NURSE';
+  const roleValue: Role = parsed.role === 'NURSE' ? 'PROVIDER' : parsed.role === 'PATIENT' ? 'MOTHER' : parsed.role;
+
   const profileBase = {
     fullName: parsed.fullName,
     email: parsed.email,
@@ -110,8 +113,8 @@ export async function register(input: RegistrationInput, options: RegisterOption
     dateOfBirth: parsed.dateOfBirth || null,
     country: countryCode,
     language: parsed.language as LanguageCode,
-    role: parsed.role,
-    status: (parsed.role === 'PROVIDER' && requiresApproval ? 'PENDING_APPROVAL' : 'ACTIVE') as UserProfile['status'],
+    role: roleValue,
+    status: (isStaffRole && requiresApproval ? 'PENDING_APPROVAL' : 'ACTIVE') as UserProfile['status'],
     emergencyContact:
       parsed.emergencyName && parsed.emergencyPhone
         ? { name: parsed.emergencyName, phone: parsed.emergencyPhone, relationship: parsed.emergencyRelationship || 'Family' }
@@ -123,7 +126,7 @@ export async function register(input: RegistrationInput, options: RegisterOption
     photoUrl: null,
     photoPublicId: null,
     providerId: null,
-    facilityId: null,
+    facilityId: parsed.facilityId || null,
     notificationPrefs: { ...DEFAULT_NOTIFICATION_PREFS },
   } satisfies Omit<UserProfile, 'id' | 'uid' | 'createdAt' | 'updatedAt'>;
 
@@ -182,7 +185,7 @@ export async function register(input: RegistrationInput, options: RegisterOption
   }
 
   /* Pregnancy, so the tracker is useful from the first screen. */
-  if (parsed.role === 'MOTHER' && options.pregnancy && (options.pregnancy.lmpDate || options.pregnancy.eddDate)) {
+  if ((parsed.role === 'MOTHER' || parsed.role === 'PATIENT') && options.pregnancy && (options.pregnancy.lmpDate || options.pregnancy.eddDate)) {
     await registry.data.create('pregnancies', {
       userId: actor.uid,
       lmpDate: options.pregnancy.lmpDate,
@@ -193,7 +196,7 @@ export async function register(input: RegistrationInput, options: RegisterOption
       status: 'active',
       deliveryDate: null,
       postnatalSince: null,
-      facilityId: null,
+      facilityId: parsed.facilityId || null,
       notes: null,
     }).catch(() => undefined);
   }

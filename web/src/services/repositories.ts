@@ -11,6 +11,7 @@ import { newId } from '@/lib/ids';
 import { addDays, toIsoDate } from '@/lib/utils';
 import {
   DEFAULT_NOTIFICATION_PREFS,
+  HEALTHCARE_REPORT_TYPE_LABELS,
   type Announcement,
   type AppNotification,
   type Appointment,
@@ -23,6 +24,8 @@ import {
   type Facility,
   type Feedback,
   type HealthcareProvider,
+  type HealthcareReport,
+  type HealthcareReportType,
   type ImmunizationRecord,
   type JournalEntry,
   type Message,
@@ -442,18 +445,42 @@ export const articleRepo = {
 
 /* ── Facilities ───────────────────────────────────────────────────────── */
 
+let facilityCache: { at: number; rows: Facility[] } | null = null;
+const FACILITY_CACHE_TTL = 5 * 60_000;
+
 export const facilityRepo = {
-  async list(): Promise<Facility[]> {
-    return data().rows('facilities', { orderBy: { field: 'name', direction: 'asc' }, limit: 1000 });
+  async list(forceRefresh = false): Promise<Facility[]> {
+    if (!forceRefresh && facilityCache && Date.now() - facilityCache.at < FACILITY_CACHE_TTL) {
+      return facilityCache.rows;
+    }
+    const rows = await data().rows('facilities', { orderBy: { field: 'name', direction: 'asc' }, limit: 1000 });
+    facilityCache = { at: Date.now(), rows };
+    return rows;
   },
 
-  get: (id: string) => data().get('facilities', id),
+  get: async (id: string) => {
+    if (facilityCache && Date.now() - facilityCache.at < FACILITY_CACHE_TTL) {
+      const match = facilityCache.rows.find((f) => f.id === id);
+      if (match) return match;
+    }
+    return data().get('facilities', id);
+  },
 
-  create: (input: Omit<Facility, 'id' | 'createdAt' | 'updatedAt'>) => data().create('facilities', input),
-  update: (id: string, patch: Partial<Facility>) => data().update('facilities', id, patch),
-  remove: (id: string) => data().remove('facilities', id),
+  create: async (input: Omit<Facility, 'id' | 'createdAt' | 'updatedAt'>) => {
+    facilityCache = null;
+    return data().create('facilities', input);
+  },
+  update: async (id: string, patch: Partial<Facility>) => {
+    facilityCache = null;
+    return data().update('facilities', id, patch);
+  },
+  remove: async (id: string) => {
+    facilityCache = null;
+    return data().remove('facilities', id);
+  },
 
   async verify(id: string, verifiedBy: string): Promise<Facility> {
+    facilityCache = null;
     return data().update('facilities', id, { verified: true, verifiedAt: new Date().toISOString() });
   },
 };
@@ -794,6 +821,143 @@ export const feedbackRepo = {
   remove: (id: string) => data().remove('feedback', id),
 };
 
+/* ── Healthcare Reports & Content Reports ───────────────────────────── */
+
+export const healthcareReportRepo = {
+  async create(input: {
+    patientId: string;
+    patientName: string;
+    facilityId: string;
+    facilityName: string;
+    facilityAddress?: string | null;
+    facilityPhone?: string | null;
+    reportType: HealthcareReportType;
+    title?: string;
+    reportNumber?: string;
+    status?: 'draft' | 'final' | 'archived';
+    documentUrl?: string | null;
+    documentPublicId?: string | null;
+    metadata?: HealthcareReport['metadata'];
+  }): Promise<HealthcareReport> {
+    const me = requireActor();
+    const year = new Date().getFullYear();
+    const randSeq = Math.floor(10000 + Math.random() * 90000);
+    const reportNumber = input.reportNumber || `MamaCare_Report_${year}-${randSeq}`;
+    const title = input.title || HEALTHCARE_REPORT_TYPE_LABELS[input.reportType] || 'Official Healthcare Report';
+
+    const row = (await data().create('reports', {
+      patientId: input.patientId,
+      patientName: input.patientName,
+      facilityId: input.facilityId,
+      facilityName: input.facilityName,
+      facilityAddress: input.facilityAddress ?? null,
+      facilityPhone: input.facilityPhone ?? null,
+      reportType: input.reportType,
+      reportNumber,
+      title,
+      generatedBy: me.uid,
+      generatedByName: me.displayName || 'Healthcare Clinician',
+      generatedByRole: me.role,
+      status: input.status || 'final',
+      documentUrl: input.documentUrl ?? null,
+      documentPublicId: input.documentPublicId ?? null,
+      metadata: input.metadata || {},
+    } as never)) as unknown as HealthcareReport;
+
+    await logAudit('record-create', 'reports', row.id, `${title} #${reportNumber} for patient ${input.patientName}`);
+    return row;
+  },
+
+  async forPatient(patientId: string): Promise<HealthcareReport[]> {
+    const rows = (await data().rows('reports', {
+      where: [{ field: 'patientId', op: '==', value: patientId }],
+      orderBy: { field: 'createdAt', direction: 'desc' },
+      limit: 100,
+    })) as unknown as (HealthcareReport | ContentReport)[];
+
+    return rows.filter((r): r is HealthcareReport => 'patientId' in r && r.patientId === patientId);
+  },
+
+  async forProvider(): Promise<HealthcareReport[]> {
+    const me = actor();
+    if (!me) return [];
+    const all = (await data().rows('reports', {
+      orderBy: { field: 'createdAt', direction: 'desc' },
+      limit: 250,
+    })) as unknown as (HealthcareReport | ContentReport)[];
+
+    return all.filter((r): r is HealthcareReport => 'patientId' in r);
+  },
+
+  async forFacility(facilityId: string): Promise<HealthcareReport[]> {
+    const rows = (await data().rows('reports', {
+      where: [{ field: 'facilityId', op: '==', value: facilityId }],
+      orderBy: { field: 'createdAt', direction: 'desc' },
+      limit: 150,
+    })) as unknown as (HealthcareReport | ContentReport)[];
+
+    return rows.filter((r): r is HealthcareReport => 'patientId' in r);
+  },
+
+  async all(limit = 200): Promise<HealthcareReport[]> {
+    const rows = (await data().rows('reports', {
+      orderBy: { field: 'createdAt', direction: 'desc' },
+      limit,
+    })) as unknown as (HealthcareReport | ContentReport)[];
+
+    return rows.filter((r): r is HealthcareReport => 'patientId' in r);
+  },
+
+  async get(id: string): Promise<HealthcareReport | null> {
+    const r = (await data().get('reports', id)) as unknown as (HealthcareReport | ContentReport | null);
+    if (r && 'patientId' in r) return r as HealthcareReport;
+    return null;
+  },
+
+  async update(id: string, patch: Partial<HealthcareReport>): Promise<HealthcareReport> {
+    const updated = (await data().update('reports', id, patch as never)) as unknown as HealthcareReport;
+    await logAudit('record-update', 'reports', id, `Updated healthcare report #${updated.reportNumber}`);
+    return updated;
+  },
+
+  async remove(id: string): Promise<void> {
+    await logAudit('record-delete', 'reports', id, 'Deleted healthcare report');
+    await data().remove('reports', id);
+  },
+
+  async search(filters: {
+    patientName?: string;
+    patientId?: string;
+    reportNumber?: string;
+    facilityId?: string;
+    reportType?: string;
+    status?: string;
+  }): Promise<HealthcareReport[]> {
+    const all = await this.all(500);
+    return all.filter((r) => {
+      if (filters.patientName && !r.patientName?.toLowerCase().includes(filters.patientName.toLowerCase())) {
+        return false;
+      }
+      if (filters.patientId && !r.patientId?.toLowerCase().includes(filters.patientId.toLowerCase())) {
+        return false;
+      }
+      if (filters.reportNumber && !r.reportNumber?.toLowerCase().includes(filters.reportNumber.toLowerCase())) {
+        return false;
+      }
+      if (filters.facilityId && filters.facilityId !== 'ALL' && r.facilityId !== filters.facilityId) {
+        return false;
+      }
+      if (filters.reportType && filters.reportType !== 'ALL' && r.reportType !== filters.reportType) {
+        return false;
+      }
+      if (filters.status && filters.status !== 'ALL' && r.status !== filters.status) {
+        return false;
+      }
+      return true;
+    });
+  },
+};
+
 export const reportRepo = {
   async submit(input: { targetType: ReportTargetType; targetId: string; targetLabel: string; reason: string; details?: string | null }): Promise<void> {
     const me = actor();
@@ -809,11 +973,14 @@ export const reportRepo = {
       reviewedBy: null,
       reviewedAt: null,
       resolution: null,
-    });
+    } as never);
   },
 
-  all: () => data().rows('reports', { orderBy: { field: 'createdAt', direction: 'desc' }, limit: 500 }),
-  update: (id: string, patch: Partial<ContentReport>) => data().update('reports', id, patch),
+  async all(): Promise<ContentReport[]> {
+    const rows = (await data().rows('reports', { orderBy: { field: 'createdAt', direction: 'desc' }, limit: 500 })) as (ContentReport | HealthcareReport)[];
+    return rows.filter((r): r is ContentReport => 'targetType' in r);
+  },
+  update: (id: string, patch: Partial<ContentReport>) => data().update('reports', id, patch as never),
 };
 
 export const announcementRepo = {

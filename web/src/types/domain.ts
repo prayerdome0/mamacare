@@ -13,20 +13,22 @@
 
 /* ── Roles and accounts ───────────────────────────────────────────────── */
 
-export type Role = 'MOTHER' | 'SUPPORTER' | 'PROVIDER' | 'FACILITY_ADMIN' | 'ADMIN';
+export type Role = 'MOTHER' | 'PATIENT' | 'SUPPORTER' | 'PROVIDER' | 'NURSE' | 'FACILITY_ADMIN' | 'ADMIN';
 
-export const ROLES: Role[] = ['MOTHER', 'SUPPORTER', 'PROVIDER', 'FACILITY_ADMIN', 'ADMIN'];
+export const ROLES: Role[] = ['MOTHER', 'PATIENT', 'SUPPORTER', 'PROVIDER', 'NURSE', 'FACILITY_ADMIN', 'ADMIN'];
 
 export const ROLE_LABELS: Record<Role, string> = {
   MOTHER: 'Mother',
+  PATIENT: 'Patient',
   SUPPORTER: 'Family supporter',
   PROVIDER: 'Healthcare provider',
+  NURSE: 'Nurse',
   FACILITY_ADMIN: 'Facility administrator',
   ADMIN: 'System administrator',
 };
 
 /** Roles that work inside a facility rather than for themselves. */
-export const STAFF_ROLES: Role[] = ['PROVIDER', 'FACILITY_ADMIN', 'ADMIN'];
+export const STAFF_ROLES: Role[] = ['PROVIDER', 'NURSE', 'FACILITY_ADMIN', 'ADMIN'];
 
 export type AccountStatus = 'ACTIVE' | 'PENDING_APPROVAL' | 'SUSPENDED' | 'CLOSED';
 
@@ -397,6 +399,12 @@ export interface Facility extends BaseRecord {
   city: string;
   province: string;
   country: string;
+  /** Level of facility, e.g. "Level 1 Hospital", "Health Centre", "Health Post". */
+  level?: string;
+  /** Ownership, e.g. "Government", "Faith-Based / Mission", "Private". */
+  ownership?: string;
+  /** Local administrative ward if recorded. */
+  ward?: string | null;
   /**
    * One or two sentences of verified context (when the facility was built, what
    * it is known for, its role in the district). Kept deliberately factual; where
@@ -410,13 +418,17 @@ export interface Facility extends BaseRecord {
   services: string[];
   maternalServices: string[];
   openingHours: string;
+  operatingHours?: string;
   hasMaternity: boolean;
   has24HourEmergency: boolean;
   imageUrl: string | null;
   imagePublicId: string | null;
+  logo?: string | null;
+  logoUrl?: string | null;
   verified: boolean;
   verifiedAt: string | null;
   active: boolean;
+  status?: 'active' | 'inactive';
 }
 
 /* ── Healthcare providers ─────────────────────────────────────────────── */
@@ -570,6 +582,79 @@ export interface ContentReport extends BaseRecord {
   reviewedBy: string | null;
   reviewedAt: string | null;
   resolution: string | null;
+}
+
+/* ── Healthcare clinical reports ───────────────────────────────────────── */
+
+export type HealthcareReportType =
+  | 'antenatal-summary'
+  | 'clinical-visit'
+  | 'postnatal-summary'
+  | 'immunization-record'
+  | 'maternal-health-summary'
+  | 'facility-referral';
+
+export const HEALTHCARE_REPORT_TYPE_LABELS: Record<HealthcareReportType, string> = {
+  'antenatal-summary': 'Antenatal Care Summary',
+  'clinical-visit': 'Clinical Visit Report',
+  'postnatal-summary': 'Postnatal Care Summary',
+  'immunization-record': 'Child Immunization Record',
+  'maternal-health-summary': 'Maternal Health Record',
+  'facility-referral': 'Clinical Facility Referral',
+};
+
+export interface HealthcareReportMetadata {
+  gestationalAgeWeeks?: number | null;
+  gestationalAgeDays?: number | null;
+  eddDate?: string | null;
+  lmpDate?: string | null;
+  gravida?: number | null;
+  para?: number | null;
+  bloodPressure?: string | null;
+  systolic?: number | null;
+  diastolic?: number | null;
+  weightKg?: number | null;
+  hbLevel?: string | null;
+  bloodGroup?: string | null;
+  fundalHeightCm?: number | null;
+  fetalHeartRate?: string | null;
+  fetalMovement?: string | null;
+  riskLevel?: RiskLevel | null;
+  clinicalNotes?: string | null;
+  diagnosisSummary?: string | null;
+  prescriptions?: string[] | null;
+  vaccinesAdministered?: string[] | null;
+  nextAppointmentDate?: string | null;
+  referralReason?: string | null;
+  referringFacilityId?: string | null;
+  referredToFacilityId?: string | null;
+  emergencySignsNoted?: string[] | null;
+  observationsSummary?: string | null;
+  patientAge?: number | null;
+  patientPhone?: string | null;
+  patientIdReference?: string | null;
+  emergencyContact?: EmergencyContact | null;
+  [key: string]: unknown;
+}
+
+export interface HealthcareReport extends BaseRecord {
+  patientId: string;
+  patientName: string;
+  facilityId: string;
+  facilityName: string;
+  facilityAddress?: string | null;
+  facilityPhone?: string | null;
+  reportType: HealthcareReportType;
+  /** Professional reference e.g. "MamaCare_Report_2026-00125" */
+  reportNumber: string;
+  title: string;
+  generatedBy: string;
+  generatedByName: string;
+  generatedByRole: Role | string;
+  status: 'draft' | 'final' | 'archived';
+  documentUrl: string | null;
+  documentPublicId: string | null;
+  metadata: HealthcareReportMetadata;
 }
 
 export type AuditAction =

@@ -22,6 +22,7 @@ export const STORES = [
   'journal',
   'articles',
   'facilities',
+  'healthFacilities',
   'providers',
   'messages',
   'notifications',

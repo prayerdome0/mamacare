@@ -69,8 +69,9 @@ export const isLinkedPatient = (userId: string | null | undefined): boolean =>
 export const isAdmin = (actor: Actor | null): boolean => actor?.role === 'ADMIN';
 export const isFacilityAdmin = (actor: Actor | null): boolean => actor?.role === 'FACILITY_ADMIN';
 export const isStaff = (actor: Actor | null): boolean =>
-  actor !== null && (actor.role === 'ADMIN' || actor.role === 'FACILITY_ADMIN' || actor.role === 'PROVIDER');
-export const isMother = (actor: Actor | null): boolean => actor?.role === 'MOTHER';
+  actor !== null && (actor.role === 'ADMIN' || actor.role === 'FACILITY_ADMIN' || actor.role === 'PROVIDER' || actor.role === 'NURSE');
+export const isMother = (actor: Actor | null): boolean => actor?.role === 'MOTHER' || actor?.role === 'PATIENT';
+export const isProvider = (actor: Actor | null): boolean => actor?.role === 'PROVIDER' || actor?.role === 'NURSE';
 
 const field = (row: unknown, key: string): unknown => (row as Record<string, unknown> | null)?.[key];
 const str = (value: unknown): string => (typeof value === 'string' ? value : '');
@@ -100,7 +101,7 @@ const OWNER_FIELD: Partial<Record<CollectionName, string>> = {
 };
 
 /** Collections anybody may read (subject to the row-level filters below). */
-const PUBLIC_READ: CollectionName[] = ['articles', 'facilities', 'announcements', 'settings'];
+const PUBLIC_READ: CollectionName[] = ['articles', 'facilities', 'healthFacilities', 'announcements', 'settings'];
 
 /** Fields a user may never set on their own account. */
 const PROTECTED_USER_FIELDS = ['role', 'status', 'privilegeVersion', 'uid', 'createdAt', 'providerId', 'facilityId'];
@@ -136,7 +137,8 @@ export function canReadCollection(actor: Actor | null, name: CollectionName): bo
   if (!actor) return false;
   if (isAdmin(actor)) return true;
   if (name === 'audit_logs') return isAdmin(actor);
-  if (name === 'reports' || name === 'feedback') return isAdmin(actor) || isFacilityAdmin(actor);
+  if (name === 'feedback') return isAdmin(actor) || isFacilityAdmin(actor);
+  if (name === 'reports') return true; // row-level checks enforce patient/staff/reporter isolation
   if (name === 'providers') return true; // the directory is public; the row filter narrows it
   if (name === 'care_links') return true; // filtered to the actor's own links
   return true; // row-level checks decide
@@ -156,7 +158,7 @@ export function canReadRow(actor: Actor | null, name: CollectionName, row: unkno
     return audience === 'provider' ? deny('This article is for healthcare providers.') : allow;
   }
 
-  if (name === 'facilities') {
+  if (name === 'facilities' || name === 'healthFacilities') {
     if (isAdmin(actor) || isFacilityAdmin(actor)) return allow;
     return field(row, 'active') === false ? deny('This facility is not listed.') : allow;
   }
@@ -202,11 +204,27 @@ export function canReadRow(actor: Actor | null, name: CollectionName, row: unkno
 
   if (name === 'audit_logs') return deny('Audit history is restricted to administrators.');
 
-  if (name === 'reports' || name === 'feedback') {
+  if (name === 'reports') {
+    if (isAdmin(actor) || isFacilityAdmin(actor)) return allow;
+    // Patient reading their own authorized healthcare report
+    if (str(field(row, 'patientId')) === actor.uid) return allow;
+    // Clinician who generated it or linked to the patient
+    if (str(field(row, 'generatedBy')) === actor.uid) return allow;
+    const patientId = str(field(row, 'patientId'));
+    if (patientId && isLinkedPatient(patientId)) return allow;
+    // Staff at the facility where report was created
+    const facilityId = str(field(row, 'facilityId'));
+    if (facilityId && actor.facilityId && actor.facilityId === facilityId && isStaff(actor)) return allow;
+    // User reading a content report they filed
+    if (str(field(row, 'reporterId')) === actor.uid) return allow;
+    return deny('You are not authorized to view this report.');
+  }
+
+  if (name === 'feedback') {
     if (isFacilityAdmin(actor)) return allow;
     return str(field(row, 'reporterId')) === actor.uid || str(field(row, 'userId')) === actor.uid
       ? allow
-      : deny('You can only see reports you submitted.');
+      : deny('You can only see feedback you submitted.');
   }
 
   if (name === 'messages') {
@@ -361,7 +379,7 @@ export function canWrite(
     return deny('You cannot change this provider profile.');
   }
 
-  if (name === 'facilities') {
+  if (name === 'facilities' || name === 'healthFacilities') {
     if (isFacilityAdmin(actor) && (field(existing, 'id') === actor.facilityId || field(patch, 'id') === actor.facilityId)) {
       return op === 'delete' ? deny('Ask a system administrator to remove a facility.') : allow;
     }
@@ -410,7 +428,25 @@ export function canWrite(
     return op === 'update' && onlyReadState ? allow : deny('Notifications cannot be edited.');
   }
 
-  if (name === 'reports' || name === 'feedback') {
+  if (name === 'reports') {
+    if (isAdmin(actor)) return allow;
+    if (op === 'create') {
+      if (str(patch?.reporterId) === actor.uid) return allow;
+      if (isStaff(actor)) {
+        const patientId = str(patch?.patientId);
+        if (patientId && (isLinkedPatient(patientId) || actor.facilityId === str(patch?.facilityId))) {
+          return allow;
+        }
+      }
+      return deny('You are not authorized to generate this report.');
+    }
+    if (isFacilityAdmin(actor)) return op === 'delete' ? deny('Reports cannot be deleted.') : allow;
+    if (str(field(existing, 'generatedBy')) === actor.uid && isStaff(actor)) return allow;
+    const own = str(field(existing, 'reporterId')) === actor.uid;
+    return own && op === 'delete' ? allow : deny('You cannot change this report.');
+  }
+
+  if (name === 'feedback') {
     if (op === 'create') return allow;
     if (isFacilityAdmin(actor)) return op === 'delete' ? deny('Keep feedback for the record.') : allow;
     const own = str(field(existing, 'reporterId')) === actor.uid || str(field(existing, 'userId')) === actor.uid;
