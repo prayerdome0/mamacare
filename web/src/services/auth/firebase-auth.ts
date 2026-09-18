@@ -340,12 +340,27 @@ export function mapAuthError(error: unknown): AppError {
         'This site is not listed as an authorised domain for the Firebase project. Add it under Authentication → Settings → Authorised domains.',
         'CONFIGURATION',
       );
-    default:
-      return new AppError(
-        (error as Error)?.message || 'Authentication failed. Please try again.',
-        'UNKNOWN',
-        { retryable: true },
-      );
+    case 'auth/missing-password':
+      return new AppError('Please enter your password.', 'VALIDATION');
+    case 'auth/missing-email':
+      return new AppError('Please enter your email address.', 'VALIDATION');
+    case 'auth/expired-action-code':
+      return new AppError('The password reset link has expired. Please request a new reset link.', 'VALIDATION');
+    case 'auth/invalid-action-code':
+      return new AppError('The password reset link is invalid or has already been used.', 'VALIDATION');
+    case 'auth/quota-exceeded':
+      return new AppError('Authentication service is temporarily busy. Please wait a moment and try again.', 'RATE_LIMIT');
+    case 'auth/internal-error':
+      return new AppError('A secure connection could not be established. Please check your internet connection and try again.', 'NETWORK', { retryable: true });
+    case 'auth/account-exists-with-different-credential':
+      return new AppError('An account already exists with that email address. Try signing in instead.', 'CONFLICT');
+    default: {
+      const msg = (error as Error)?.message || '';
+      if (!msg || msg.includes('Firebase:') || msg.includes('auth/')) {
+        return new AppError('Authentication service could not complete your request. Please check your details and try again.', 'UNKNOWN', { retryable: true });
+      }
+      return new AppError(msg, 'UNKNOWN', { retryable: true });
+    }
   }
 }
 

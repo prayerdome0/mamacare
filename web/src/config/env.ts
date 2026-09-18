@@ -73,7 +73,7 @@ export const misconfigured = forcedProvider === 'firebase' && !firebaseComplete;
 
 const CLOUDINARY_DEFAULTS = {
   cloudName: 'mk2tulbt',
-  uploadPreset: 'Mamacare',
+  uploadPreset: 'Mamcare',
 };
 
 const cloudinary = {

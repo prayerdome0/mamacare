@@ -76,11 +76,11 @@ service cloud.firestore {
     }
 
     function isProvider() {
-      return role() == 'PROVIDER';
+      return role() == 'PROVIDER' || role() == 'NURSE';
     }
 
     function isMother() {
-      return role() == 'MOTHER';
+      return role() == 'MOTHER' || role() == 'PATIENT';
     }
 
     function isSupporter() {
@@ -187,7 +187,7 @@ service cloud.firestore {
       allow create: if signedIn()
         && userId == uid()
         && request.resource.data.uid == userId
-        && request.resource.data.role in ['MOTHER', 'SUPPORTER', 'PROVIDER'];
+        && request.resource.data.role in ['MOTHER', 'PATIENT', 'SUPPORTER', 'PROVIDER', 'NURSE'];
 
       // Owners manage their own profile but cannot touch the fields that carry
       // privilege. Administrators manage everything; facility administrators manage
@@ -201,7 +201,7 @@ service cloud.firestore {
               && unchanged('createdAt')
               && unchanged('providerId')
               && unchanged('facilityId'))
-        || (isFacilityAdmin() && resource.data.facilityId == myFacilityId() && resource.data.role == 'PROVIDER');
+        || (isFacilityAdmin() && resource.data.facilityId == myFacilityId() && (resource.data.role == 'PROVIDER' || resource.data.role == 'NURSE'));
 
       // Deleting your own account is a right, not a favour.
       allow delete: if isAdmin() || (signedIn() && userId == uid());
@@ -393,11 +393,19 @@ service cloud.firestore {
     }
 
     match /facilities/{facilityId} {
-      allow read: if isAdmin() || isFacilityAdmin() || resource.data.active == true;
+      allow read: if isAdmin() || isFacilityAdmin() || resource.data.active == true || resource.data.status == 'active';
       allow create: if accountInGoodStanding() && (isAdmin() || isFacilityAdmin());
       allow update: if isAdmin()
         || (accountInGoodStanding() && isFacilityAdmin() && resource.data.id == myFacilityId());
       // Removing a facility breaks history on appointments already recorded there.
+      allow delete: if isAdmin();
+    }
+
+    match /healthFacilities/{facilityId} {
+      allow read: if isAdmin() || isFacilityAdmin() || resource.data.active == true || resource.data.status == 'active';
+      allow create: if accountInGoodStanding() && (isAdmin() || isFacilityAdmin());
+      allow update: if isAdmin()
+        || (accountInGoodStanding() && isFacilityAdmin() && resource.data.id == myFacilityId());
       allow delete: if isAdmin();
     }
 
@@ -484,12 +492,31 @@ service cloud.firestore {
     /* ── Reports, feedback and the audit trail ────────────────────────── */
 
     match /reports/{reportId} {
+      // Patients read only their own authorized healthcare reports.
+      // Clinicians read reports they generated, reports for their linked patients, or facility reports.
+      // Administrators have full access.
+      // Reporters may read content issue reports they filed.
       allow read: if isAdmin()
+        || (signedIn() && resource.data.patientId == uid())
+        || (signedIn() && resource.data.generatedBy == uid())
+        || (signedIn() && isStaff() && resource.data.patientId != null && linkedClinician(resource.data.patientId))
+        || (signedIn() && isStaff() && resource.data.facilityId != null && resource.data.facilityId == myFacilityId())
         || isFacilityAdmin()
         || (signedIn() && resource.data.reporterId == uid());
-      // Anyone signed in may report something wrong or unsafe.
-      allow create: if accountInGoodStanding() && request.resource.data.reporterId == uid();
-      allow update: if isAdmin() || isFacilityAdmin();
+
+      // Staff (clinicians/admins) create healthcare reports for linked patients or at their facility.
+      // Any signed in user may file a content problem report (with reporterId stamped as uid).
+      allow create: if isAdmin()
+        || (accountInGoodStanding() && isStaff()
+              && (linkedClinician(request.resource.data.patientId)
+                  || (request.resource.data.facilityId != null && request.resource.data.facilityId == myFacilityId())
+                  || request.resource.data.generatedBy == uid()))
+        || (accountInGoodStanding() && request.resource.data.reporterId == uid());
+
+      allow update: if isAdmin()
+        || (accountInGoodStanding() && isStaff() && resource.data.generatedBy == uid())
+        || isFacilityAdmin();
+
       allow delete: if isAdmin();
     }
 

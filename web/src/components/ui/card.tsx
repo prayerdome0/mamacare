@@ -10,6 +10,7 @@ export function Card({
   className,
   bodyClassName,
   as: Tag = 'section',
+  onClick,
 }: {
   title?: ReactNode;
   description?: ReactNode;
@@ -18,10 +19,26 @@ export function Card({
   className?: string;
   bodyClassName?: string;
   as?: 'section' | 'div' | 'article' | 'aside';
+  onClick?: () => void;
 }) {
   const hasHeader = title !== undefined || actions !== undefined || description !== undefined;
   return (
-    <Tag className={cn('card overflow-hidden', className)}>
+    <Tag
+      className={cn('card overflow-hidden', className)}
+      onClick={onClick}
+      role={onClick ? 'button' : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      onKeyDown={
+        onClick
+          ? (e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                onClick();
+              }
+            }
+          : undefined
+      }
+    >
       {hasHeader ? (
         <header className="flex flex-wrap items-start justify-between gap-3 border-b border-ink-200 bg-white px-4 py-3.5 sm:px-5">
           <div className="min-w-0">

@@ -17,6 +17,8 @@ import {
   Baby as BabyIcon,
   CalendarDays,
   ClipboardList,
+  FilePlus,
+  FileText,
   Lock,
   MessageSquare,
   Plus,
@@ -25,6 +27,9 @@ import {
   Users,
   X,
 } from 'lucide-react';
+import { GenerateReportModal } from '@/components/reports/generate-report-modal';
+import { ReportPreviewModal } from '@/components/reports/report-preview-modal';
+import type { HealthcareReport } from '@/types/domain';
 import { useAsync } from '@/hooks';
 import {
   appointmentRepo,
@@ -216,6 +221,8 @@ export function PatientDetailPage() {
   const uid = actor?.uid ?? '';
   const [tab, setTab] = useState('summary');
   const [observationOpen, setObservationOpen] = useState(false);
+  const [reportModalOpen, setReportModalOpen] = useState(false);
+  const [previewReport, setPreviewReport] = useState<HealthcareReport | null>(null);
 
   const { data: links } = useAsync(() => careLinkRepo.forProvider(), { deps: [uid], immediate: Boolean(uid) });
   const link = (links ?? []).find((candidate) => candidate.motherUserId === patientId) ?? null;
@@ -327,6 +334,14 @@ export function PatientDetailPage() {
         }
         actions={
           <>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setReportModalOpen(true)}
+              icon={<FilePlus className="size-4" aria-hidden />}
+            >
+              Generate Report
+            </Button>
             <Button
               variant="secondary"
               size="sm"
@@ -574,6 +589,26 @@ export function PatientDetailPage() {
           toast.success('Observation recorded', 'It is visible to the patient and to you.');
           navigate(`/provider/patients/${patientId}`, { replace: true });
         }}
+      />
+
+      <GenerateReportModal
+        open={reportModalOpen}
+        onClose={() => setReportModalOpen(false)}
+        onCreated={(r) => {
+          setPreviewReport(r);
+        }}
+        preselectedPatient={{
+          uid: patientId,
+          name: profile?.fullName ?? link?.motherName ?? 'Patient',
+          facilityId: link?.facilityId ?? null,
+          facilityName: link?.facilityName ?? null,
+        }}
+      />
+
+      <ReportPreviewModal
+        report={previewReport}
+        open={Boolean(previewReport)}
+        onClose={() => setPreviewReport(null)}
       />
     </StaffShell>
   );

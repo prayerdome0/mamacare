@@ -43,6 +43,8 @@ const BecomeAProviderPage = lazy(() => import('@/routes/auth/become-a-provider')
 
 /* ── Mother (and supporter) app ────────────────────────────────────────── */
 const MotherHome = lazy(() => import('@/routes/mother/home'));
+const MotherRecordsPage = lazy(() => import('@/routes/mother/records'));
+const MotherReportsPage = lazy(() => import('@/routes/mother/reports'));
 const PregnancyTrackerPage = lazy(() => import('@/routes/mother/pregnancy'));
 const WeeklyGuidePage = lazy(() => import('@/routes/mother/guide'));
 const AppointmentsPage = lazy(() => import('@/routes/mother/appointments'));
@@ -56,6 +58,7 @@ const MotherEmergencyPage = lazy(() => import('@/routes/mother/emergency'));
 const NotificationsPage = lazy(() => import('@/routes/mother/notifications'));
 const MotherProfilePage = lazy(() => import('@/routes/mother/profile'));
 const MotherSettingsPage = lazy(() => import('@/routes/mother/settings'));
+const LogoutPage = lazy(() => import('@/routes/auth/logout'));
 
 /* ── Healthcare provider portal ────────────────────────────────────────── */
 const ProviderDashboard = lazy(() => import('@/routes/provider/dashboard'));
@@ -103,6 +106,65 @@ function HomeRedirect() {
   const { actor, ready } = useSession();
   if (!ready) return <FullPageSpinner label="Finding your home screen" />;
   return <Navigate to={homeForRole(actor?.role)} replace />;
+}
+
+function ReportsRedirect() {
+  const { actor, ready } = useSession();
+  if (!ready) return <FullPageSpinner label="Loading reports" />;
+  if (!actor) return <Navigate to="/sign-in" replace />;
+  if (actor.role === 'ADMIN' || actor.role === 'FACILITY_ADMIN') return <Navigate to="/admin/reports" replace />;
+  if (actor.role === 'PROVIDER' || actor.role === 'NURSE') return <Navigate to="/provider/reports" replace />;
+  return <Navigate to="/app/reports" replace />;
+}
+
+function RecordsRedirect() {
+  const { actor, ready } = useSession();
+  if (!ready) return <FullPageSpinner label="Loading health records" />;
+  if (!actor) return <Navigate to="/sign-in" replace />;
+  if (actor.role === 'ADMIN' || actor.role === 'FACILITY_ADMIN') return <Navigate to="/admin/reports" replace />;
+  if (actor.role === 'PROVIDER' || actor.role === 'NURSE') return <Navigate to="/provider/patients" replace />;
+  return <Navigate to="/app/records" replace />;
+}
+
+function ProfileRedirect() {
+  const { actor, ready } = useSession();
+  if (!ready) return <FullPageSpinner label="Loading profile" />;
+  if (!actor) return <Navigate to="/sign-in" replace />;
+  if (actor.role === 'ADMIN' || actor.role === 'FACILITY_ADMIN') return <Navigate to="/admin/settings" replace />;
+  if (actor.role === 'PROVIDER' || actor.role === 'NURSE') return <Navigate to="/provider/profile" replace />;
+  return <Navigate to="/app/profile" replace />;
+}
+
+function SettingsRedirect() {
+  const { actor, ready } = useSession();
+  if (!ready) return <FullPageSpinner label="Loading settings" />;
+  if (!actor) return <Navigate to="/sign-in" replace />;
+  if (actor.role === 'ADMIN' || actor.role === 'FACILITY_ADMIN') return <Navigate to="/admin/settings" replace />;
+  if (actor.role === 'PROVIDER' || actor.role === 'NURSE') return <Navigate to="/provider/profile" replace />;
+  return <Navigate to="/app/settings" replace />;
+}
+
+function NotificationsRedirect() {
+  const { actor, ready } = useSession();
+  if (!ready) return <FullPageSpinner label="Loading notifications" />;
+  if (!actor) return <Navigate to="/sign-in" replace />;
+  if (actor.role === 'ADMIN' || actor.role === 'FACILITY_ADMIN') return <Navigate to="/admin/notifications" replace />;
+  if (actor.role === 'PROVIDER' || actor.role === 'NURSE') return <Navigate to="/provider/messages" replace />;
+  return <Navigate to="/app/notifications" replace />;
+}
+
+function PatientRouteRedirect() {
+  const location = useLocation();
+  const sub = location.pathname.replace(/^\/patient\/?/, '');
+  if (!sub || sub === 'dashboard') return <Navigate to="/app" replace />;
+  return <Navigate to={`/app/${sub}`} replace />;
+}
+
+function NurseRouteRedirect() {
+  const location = useLocation();
+  const sub = location.pathname.replace(/^\/nurse\/?/, '');
+  if (!sub || sub === 'dashboard') return <Navigate to="/provider" replace />;
+  return <Navigate to={`/provider/${sub}`} replace />;
 }
 
 /** `/learn/:category` — validates the slug against the known categories. */
@@ -156,6 +218,7 @@ function AppRoutes() {
             </RedirectIfSignedIn>
           }
         />
+        <Route path="/login" element={<Navigate to="/sign-in" replace />} />
         <Route
           path="/register"
           element={
@@ -164,6 +227,7 @@ function AppRoutes() {
             </RedirectIfSignedIn>
           }
         />
+        <Route path="/sign-up" element={<Navigate to="/register" replace />} />
         <Route
           path="/forgot-password"
           element={
@@ -172,6 +236,7 @@ function AppRoutes() {
             </RedirectIfSignedIn>
           }
         />
+        <Route path="/logout" element={<LogoutPage />} />
         <Route
           path="/pending"
           element={
@@ -190,14 +255,28 @@ function AppRoutes() {
         />
         <Route path="/home" element={<HomeRedirect />} />
 
+        {/* ── Universal & Role Shortcuts ─────────────────────────── */}
+        <Route path="/reports" element={<ReportsRedirect />} />
+        <Route path="/records" element={<RecordsRedirect />} />
+        <Route path="/profile" element={<ProfileRedirect />} />
+        <Route path="/settings" element={<SettingsRedirect />} />
+        <Route path="/notifications" element={<NotificationsRedirect />} />
+
+        <Route path="/patient" element={<PatientRouteRedirect />} />
+        <Route path="/patient/*" element={<PatientRouteRedirect />} />
+        <Route path="/nurse" element={<NurseRouteRedirect />} />
+        <Route path="/nurse/*" element={<NurseRouteRedirect />} />
+
         {/* ── Mother and supporter app ───────────────────────────── */}
         <Route
           path="/app"
           element={
-            <RequireAuth roles={['MOTHER', 'SUPPORTER']}>
+            <RequireAuth roles={['MOTHER', 'PATIENT', 'SUPPORTER']}>
               <Suspense fallback={<FullPageSpinner label="Opening your tracker" />}>
                 <Routes>
                   <Route index element={<MotherHome />} />
+                  <Route path="records" element={<MotherRecordsPage />} />
+                  <Route path="reports" element={<MotherReportsPage />} />
                   <Route path="pregnancy" element={<PregnancyTrackerPage />} />
                   <Route path="guide" element={<WeeklyGuidePage />} />
                   <Route path="appointments" element={<AppointmentsPage />} />

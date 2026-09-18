@@ -44,11 +44,13 @@ type Segment = 'all' | Role | 'staff' | 'mothers-and-supporters';
 const SEGMENT_LABELS: Record<Segment, string> = {
   all: 'Everyone on the platform',
   MOTHER: 'Mothers only',
+  PATIENT: 'Patients only',
   SUPPORTER: 'Family supporters',
   PROVIDER: 'Healthcare providers',
+  NURSE: 'Nurses',
   FACILITY_ADMIN: 'Facility administrators',
   ADMIN: 'Administrators',
-  staff: 'All staff (providers, facility admins, administrators)',
+  staff: 'All staff (providers, nurses, facility admins, administrators)',
   'mothers-and-supporters': 'Mothers and their supporters',
 };
 

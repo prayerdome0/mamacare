@@ -22,6 +22,7 @@ import type {
   Facility,
   Feedback,
   HealthcareProvider,
+  HealthcareReport,
   ImmunizationRecord,
   JournalEntry,
   LanguageCode,
@@ -48,6 +49,7 @@ export interface Collections {
   journal: JournalEntry;
   articles: Article;
   facilities: Facility;
+  healthFacilities: Facility;
   providers: HealthcareProvider;
   messages: Message;
   notifications: AppNotification;
@@ -56,7 +58,7 @@ export interface Collections {
   supporters: SupporterLink;
   care_links: CareLink;
   feedback: Feedback;
-  reports: ContentReport;
+  reports: HealthcareReport | ContentReport;
   audit_logs: AuditLogEntry;
   settings: SystemSettings;
   documents: DocumentRecord;

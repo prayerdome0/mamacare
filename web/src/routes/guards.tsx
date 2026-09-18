@@ -20,10 +20,12 @@ export const homeForRole = (role: Role | null | undefined): string => {
     case 'FACILITY_ADMIN':
       return '/admin';
     case 'PROVIDER':
+    case 'NURSE':
       return '/provider';
     case 'SUPPORTER':
       return '/app';
     case 'MOTHER':
+    case 'PATIENT':
       return '/app';
     default:
       return '/';
@@ -57,7 +59,7 @@ export function RequireAuth({
   // The application screen is the one place they can also go: it shows the status
   // and the only legitimate resubmission path after a rejection.
   if (
-    actor.role === 'PROVIDER' &&
+    (actor.role === 'PROVIDER' || actor.role === 'NURSE') &&
     actor.status === 'PENDING_APPROVAL' &&
     location.pathname !== '/pending' &&
     location.pathname !== '/become-a-provider'
@@ -82,7 +84,7 @@ export function RedirectIfSignedIn({ children }: { children: ReactNode }) {
 
 /** Guards the two staff portals. */
 export const RequireProvider = ({ children }: { children: ReactNode }) => (
-  <RequireAuth roles={['PROVIDER', 'FACILITY_ADMIN', 'ADMIN']}>{children}</RequireAuth>
+  <RequireAuth roles={['PROVIDER', 'NURSE', 'FACILITY_ADMIN', 'ADMIN']}>{children}</RequireAuth>
 );
 
 export const RequireAdmin = ({ children }: { children: ReactNode }) => (
@@ -93,5 +95,5 @@ export const RequireSystemAdmin = ({ children }: { children: ReactNode }) => <Re
 
 /** Mother-facing screens: mothers, and supporters with limited visibility. */
 export const RequireMother = ({ children }: { children: ReactNode }) => (
-  <RequireAuth roles={['MOTHER', 'SUPPORTER']}>{children}</RequireAuth>
+  <RequireAuth roles={['MOTHER', 'PATIENT', 'SUPPORTER']}>{children}</RequireAuth>
 );
